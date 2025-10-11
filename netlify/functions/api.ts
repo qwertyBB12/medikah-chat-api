@@ -1,13 +1,15 @@
 import serverless from "serverless-http";
 import express from "express";
 import cors from "cors";
+import OpenAI from "openai";
 
 const app = express();
 app.use(express.json());
 
 // --- CORS ---
 const allowed = new Set<string>([
-  "https://cosmic-frangipane-bf2f87.netlify.app",
+  "https://cosmic-frangipane-bf2f87.netlify.app", // your frontend
+  // add "https://medikah.app" when ready
 ]);
 
 app.use((req, res, next) => {
@@ -30,11 +32,26 @@ router.get("/health", (_req, res) => {
 });
 
 router.post("/chat", async (req, res) => {
-  const { message } = req.body ?? {};
-  if (!message) return res.status(400).json({ ok: false, error: "message required" });
+  try {
+    const { message } = req.body ?? {};
+    if (!message) return res.status(400).json({ ok: false, error: "message required" });
 
-  const reply = `Medikah says: I received "${message}" and I'm alive!`;
-  return res.json({ ok: true, reply });
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.5,
+      messages: [
+        { role: "system", content: "You are Medikah, an empathetic, concise healthcare assistant. You do not diagnose; you suggest next steps, symptom triage, and advise seeing licensed professionals when appropriate. Respond in the user's language (English or Spanish)." },
+        { role: "user", content: String(message) },
+      ],
+    });
+
+    const reply = completion.choices?.[0]?.message?.content ?? "";
+    return res.json({ ok: true, reply });
+  } catch (err: any) {
+    console.error("chat error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "chat failed" });
+  }
 });
 
 app.use("/.netlify/functions/api", router);

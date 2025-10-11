@@ -2,6 +2,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "openai": "^6.3.0",
     "serverless-http": "^4.0.0"
   }
 }
