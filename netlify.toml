@@ -1,0 +1,9 @@
+[build]
+  command = "npm ci"
+  publish = "public"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api"
+  status = 200
