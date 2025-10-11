@@ -11,7 +11,7 @@ const allowed = new Set<string>([
   // add more later, e.g. "https://medikah.app"
 ]);
 
-// 1) Explicit header setter (works reliably with serverless/http)
+// Explicit header setter + preflight handler
 app.use((req, res, next) => {
   const origin = req.headers.origin as string | undefined;
   if (origin && allowed.has(origin)) {
@@ -20,14 +20,13 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   }
-  // handle preflight quickly
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
   next();
 });
 
-// 2) Also keep cors() as a belt-and-suspenders
+// Also keep cors() (belt-and-suspenders)
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
