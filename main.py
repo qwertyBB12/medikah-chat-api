@@ -31,10 +31,13 @@ app.add_middleware(
 )
 
 load_dotenv()
-raw_level = os.getenv("LOG_LEVEL", "INFO")
-level = getattr(logging, raw_level.upper(), logging.INFO)
-logging.basicConfig(level=level)
+# --- Safe logging configuration ---
+log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.info(f"✅ Using log level: {log_level_str} ({log_level})")
 logger = logging.getLogger("medikah.api")
+logging.info("🚀 Medikah API starting up successfully — logging configured OK")
 
 try:
     openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
