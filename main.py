@@ -31,7 +31,11 @@ app.add_middleware(
 )
 
 load_dotenv()
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+if LOG_LEVEL not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
+    LOG_LEVEL = "INFO"  # fallback if an invalid value is passed
+
+logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger("medikah.api")
 
 try:
