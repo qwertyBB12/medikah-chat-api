@@ -106,14 +106,24 @@ DOXY_BASE_URL = os.getenv("DOXY_BASE_URL")
 DOCTOR_NOTIFICATION_EMAIL = os.getenv("DOCTOR_NOTIFICATION_EMAIL")
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-SENDGRID_SENDER_EMAIL = os.getenv("SENDGRID_SENDER_EMAIL", "noreply@medikah.org")
-NOTIFICATION_SENDER_EMAIL = os.getenv(
-    "NOTIFICATION_SENDER_EMAIL", SENDGRID_SENDER_EMAIL
-)
-
+SENDGRID_SENDER_EMAIL = os.getenv("SENDGRID_SENDER_EMAIL")
 APPOINTMENT_HASH_KEY = os.getenv("APPOINTMENT_HASH_KEY")
-if not APPOINTMENT_HASH_KEY:
-    raise RuntimeError("❌ Missing APPOINTMENT_HASH_KEY")
+
+missing_envs = [
+    name
+    for name, value in (
+        ("SENDGRID_API_KEY", SENDGRID_API_KEY),
+        ("SENDGRID_SENDER_EMAIL", SENDGRID_SENDER_EMAIL),
+        ("APPOINTMENT_HASH_KEY", APPOINTMENT_HASH_KEY),
+    )
+    if not value
+]
+if missing_envs:
+    logging.error(
+        "Missing required notification configuration: %s",
+        ", ".join(missing_envs),
+    )
+    raise RuntimeError("Notification service is not configured")
 
 SENDGRID_SANDBOX_MODE_RAW = os.getenv("SENDGRID_SANDBOX_MODE", "false").lower()
 SENDGRID_SANDBOX_MODE = SENDGRID_SANDBOX_MODE_RAW in {"1", "true", "yes", "on"}
@@ -130,20 +140,11 @@ DOCTOR_POOL = tuple(
 appointment_store: Optional[SecureAppointmentStore] = SecureAppointmentStore(
     APPOINTMENT_HASH_KEY
 )
-notification_service: Optional[NotificationService] = None
-if SENDGRID_API_KEY and NOTIFICATION_SENDER_EMAIL:
-    notification_service = NotificationService(
-        SENDGRID_API_KEY,
-        NOTIFICATION_SENDER_EMAIL,
-        sandbox_mode=SENDGRID_SANDBOX_MODE,
-    )
-else:
-    if not SENDGRID_API_KEY:
-        logger.warning("SENDGRID_API_KEY not provided; notification service disabled.")
-    if not NOTIFICATION_SENDER_EMAIL:
-        logger.warning(
-            "Notification sender email not provided; notification service disabled."
-        )
+notification_service: NotificationService = NotificationService(
+    SENDGRID_API_KEY,
+    SENDGRID_SENDER_EMAIL,
+    sandbox_mode=SENDGRID_SANDBOX_MODE,
+)
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -203,8 +204,7 @@ async def schedule_endpoint(
             body = req.model_dump()
         logging.info("Incoming /schedule payload: %s", body)
 
-        sandbox_mode_env = os.getenv("SENDGRID_SANDBOX_MODE", "false").lower()
-        sandbox_mode = sandbox_mode_env == "true"
+        sandbox_mode = os.getenv("SENDGRID_SANDBOX_MODE", "false").lower() == "true"
 
         if appointment_store is None or not DOXY_BASE_URL:
             logger.error(
@@ -224,19 +224,8 @@ async def schedule_endpoint(
                 detail="Appointment time must include timezone information.",
             )
 
-        sendgrid_ready = (
-            bool(SENDGRID_API_KEY)
-            and notification_service is not None
-            and bool(DOCTOR_NOTIFICATION_EMAIL)
-        )
-        if not sandbox_mode and not sendgrid_ready:
-            logger.error(
-                "Notification service configuration incomplete. "
-                "SENDGRID_API_KEY=%s, service=%s, doctor_email=%s",
-                bool(SENDGRID_API_KEY),
-                notification_service is not None,
-                bool(DOCTOR_NOTIFICATION_EMAIL),
-            )
+        if not DOCTOR_NOTIFICATION_EMAIL:
+            logger.error("Doctor notification email not configured.")
             raise HTTPException(
                 status_code=503, detail="Notification service is not configured."
             )
