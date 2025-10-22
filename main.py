@@ -319,3 +319,6 @@ async def read_root():
 def ping() -> dict[str, str]:
     """Lightweight health check endpoint."""
     return {"message": "pong"}
+
+# Temporary diagnostic to inspect registered routes; remove once verified.
+print([route.path for route in app.routes])
