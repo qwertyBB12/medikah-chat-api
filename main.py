@@ -96,9 +96,21 @@ def _resolve_duration_minutes() -> int:
 
 DOXY_BASE_URL = os.getenv("DOXY_BASE_URL")
 DOCTOR_NOTIFICATION_EMAIL = os.getenv("DOCTOR_NOTIFICATION_EMAIL")
-NOTIFICATION_SENDER_EMAIL = os.getenv("NOTIFICATION_SENDER_EMAIL")
-APPOINTMENT_HASH_KEY = os.getenv("APPOINTMENT_HASH_KEY")
+
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+if not SENDGRID_API_KEY:
+    raise RuntimeError("❌ Missing SENDGRID_API_KEY")
+
+NOTIFICATION_SENDER_EMAIL = os.getenv("SENDGRID_SENDER_EMAIL") or os.getenv(
+    "NOTIFICATION_SENDER_EMAIL"
+)
+if not NOTIFICATION_SENDER_EMAIL:
+    raise RuntimeError("❌ Missing SENDGRID_SENDER_EMAIL")
+
+APPOINTMENT_HASH_KEY = os.getenv("APPOINTMENT_HASH_KEY")
+if not APPOINTMENT_HASH_KEY:
+    raise RuntimeError("❌ Missing APPOINTMENT_HASH_KEY")
+
 SENDGRID_SANDBOX_MODE = os.getenv("SENDGRID_SANDBOX_MODE", "false").lower() in {
     "1",
     "true",
@@ -115,29 +127,14 @@ DOCTOR_POOL = tuple(
     if name.strip()
 )
 
-appointment_store: Optional[SecureAppointmentStore]
-notification_service: Optional[NotificationService]
-
-if APPOINTMENT_HASH_KEY:
-    appointment_store = SecureAppointmentStore(APPOINTMENT_HASH_KEY)
-else:
-    appointment_store = None
-    logger.error(
-        "APPOINTMENT_HASH_KEY not configured; /schedule endpoint will be unavailable."
-    )
-
-if SENDGRID_API_KEY and NOTIFICATION_SENDER_EMAIL:
-    notification_service = NotificationService(
-        SENDGRID_API_KEY,
-        NOTIFICATION_SENDER_EMAIL,
-        sandbox_mode=SENDGRID_SANDBOX_MODE,
-    )
-else:
-    notification_service = None
-    logger.error(
-        "SendGrid credentials missing; notifications cannot be delivered until "
-        "SENDGRID_API_KEY and NOTIFICATION_SENDER_EMAIL are configured."
-    )
+appointment_store: Optional[SecureAppointmentStore] = SecureAppointmentStore(
+    APPOINTMENT_HASH_KEY
+)
+notification_service: Optional[NotificationService] = NotificationService(
+    SENDGRID_API_KEY,
+    NOTIFICATION_SENDER_EMAIL,
+    sandbox_mode=SENDGRID_SANDBOX_MODE,
+)
 
 
 @app.post("/chat", response_model=ChatResponse)
