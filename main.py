@@ -610,7 +610,13 @@ def ping() -> dict[str, str]:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "ok"}
+def health() -> dict:
+    """Health check endpoint with diagnostics."""
+    return {
+        "status": "ok",
+        "openai_client": openai_client is not None,
+        "ai_responder": ai_responder is not None,
+        "supabase": conversation_store._use_db,
+        "sandbox_mode": SENDGRID_SANDBOX_MODE,
+    }
 
