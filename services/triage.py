@@ -108,15 +108,12 @@ class TriageConversationEngine:
         self, session_id: Optional[str]
     ) -> ConversationState:
         state = self._store.get_or_create(session_id)
-        # When creating a new session, ensure we start at COLLECT_NAME.
         if state.intake.patient_name:
             logger.debug(
                 "Resuming intake session %s at stage %s",
                 state.session_id,
                 state.stage,
             )
-        else:
-            state.stage = ConversationStage.COLLECT_NAME
         return state
 
     def build_summary(self, state: ConversationState) -> str:
@@ -177,7 +174,13 @@ class TriageConversationEngine:
         if locale and not intake.locale_preference:
             intake.locale_preference = locale
 
-        if state.stage == ConversationStage.COLLECT_NAME:
+        if state.stage == ConversationStage.WELCOME:
+            state.stage = ConversationStage.COLLECT_NAME
+            response = (
+                "Welcome to Medikah! I'm here to help you connect with a doctor. "
+                "To get started, could you share your name?"
+            )
+        elif state.stage == ConversationStage.COLLECT_NAME:
             intake.patient_name = _sanitize_name(text)
             intake.notes.append(f"name_raw: {text}")
             state.stage = ConversationStage.COLLECT_EMAIL
