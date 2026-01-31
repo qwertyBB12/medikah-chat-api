@@ -231,6 +231,6 @@ class AITriageResponseGenerator:
             logger.warning("Empty response from OpenAI for stage %s", stage)
             return None
 
-        except Exception:
-            logger.exception("AI response generation failed for stage %s", stage)
+        except Exception as exc:
+            logger.exception("AI response generation failed for stage %s: %s", stage, exc)
             return None
