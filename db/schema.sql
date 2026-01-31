@@ -4,7 +4,7 @@
 -- Conversation sessions
 CREATE TABLE IF NOT EXISTS conversation_sessions (
     session_id TEXT PRIMARY KEY,
-    stage TEXT NOT NULL DEFAULT 'collect_name',
+    stage TEXT NOT NULL DEFAULT 'welcome',
     patient_name TEXT,
     patient_email TEXT,
     symptom_overview TEXT,

@@ -21,6 +21,7 @@ SESSION_TTL_MINUTES = 90
 class ConversationStage(str, Enum):
     """Lifecycle stages for the intake conversation."""
 
+    WELCOME = "welcome"
     COLLECT_NAME = "collect_name"
     COLLECT_EMAIL = "collect_email"
     COLLECT_SYMPTOMS = "collect_symptoms"
@@ -122,7 +123,7 @@ class ConversationStateStore:
             "emergency_flag": intake.emergency_flag,
             "appointment_id": intake.appointment_id,
             "appointment_confirmed_at": intake.appointment_confirmed_at.isoformat() if intake.appointment_confirmed_at else None,
-            "notes": json.dumps(intake.notes),
+            "notes": intake.notes,
             "education_shared": intake.education_shared,
             "created_at": state.created_at.isoformat(),
             "updated_at": state.updated_at.isoformat(),
@@ -213,7 +214,7 @@ class ConversationStateStore:
         now = datetime.now(timezone.utc)
         state = ConversationState(
             session_id=new_id,
-            stage=ConversationStage.COLLECT_NAME,
+            stage=ConversationStage.WELCOME,
             created_at=now,
             updated_at=now,
         )
