@@ -269,8 +269,19 @@ class TriageConversationEngine:
                 emergency_noted=True,
             )
 
-        if locale and not intake.locale_preference:
-            intake.locale_preference = locale
+        # Auto-detect language from user text if not yet set
+        if not intake.locale_preference:
+            if locale:
+                intake.locale_preference = locale
+            else:
+                # Simple heuristic: common Spanish words → es
+                _spanish_markers = (
+                    "hola", "buenos", "tengo", "estoy", "quiero", "necesito",
+                    "dolor", "siento", "ayuda", "cómo", "qué", "por favor",
+                    "gracias", "médico", "cita", "salud",
+                )
+                if any(w in text.lower() for w in _spanish_markers):
+                    intake.locale_preference = "es"
 
         # ---- State machine: extract data and advance stage ----
         # Flow: WELCOME → COLLECT_SYMPTOMS → COLLECT_HISTORY → COLLECT_NAME
