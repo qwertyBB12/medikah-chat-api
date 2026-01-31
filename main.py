@@ -257,7 +257,7 @@ async def _perform_scheduling(
         doxy_link = generate_doxy_link(DOXY_BASE_URL, record.appointment_id)
     calendar_description = (
         f"Telehealth visit with {assigned_doctor} for {req.patient_name}. "
-        f"Join via Doxy.me: {doxy_link}"
+        f"Join via Medikah: {doxy_link}"
     )
     calendar_link = build_google_calendar_link(
         title="Medikah Telehealth Appointment",
@@ -277,7 +277,7 @@ async def _perform_scheduling(
         f"Hello {req.patient_name},\n\n"
         f"Your telehealth appointment with {assigned_doctor} is scheduled for "
         f"{appointment_time.isoformat()}.\n"
-        f"Join using this secure Doxy.me link: {doxy_link}\n\n"
+        f"Join using this secure Medikah link: {doxy_link}\n\n"
         f"Add the appointment to your calendar: {calendar_link}\n\n"
         "If you did not request this appointment, please contact us immediately.\n\n"
         "Thank you,\nMedikah Care Team"
@@ -286,7 +286,7 @@ async def _perform_scheduling(
         f"<p>Hello {req.patient_name},</p>"
         f"<p>Your telehealth appointment with {assigned_doctor} is scheduled for "
         f"<strong>{appointment_time.isoformat()}</strong>.</p>"
-        f"<p>Join using this secure Doxy.me link: "
+        f"<p>Join using this secure Medikah link: "
         f'<a href="{doxy_link}">{doxy_link}</a></p>'
         f'<p>Add the appointment to your calendar: <a href="{calendar_link}">'
         "Calendar Link</a></p>"
@@ -312,7 +312,7 @@ async def _perform_scheduling(
         f"{symptoms_line}"
         f"{locale_line}"
         f"{notes_line}"
-        f"Doxy.me link: {doxy_link}\n"
+        f"Medikah link: {doxy_link}\n"
         f"Calendar: {calendar_link}\n"
     )
 

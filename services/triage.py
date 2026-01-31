@@ -169,48 +169,48 @@ class TriageConversationEngine:
         if stage == ConversationStage.WELCOME:
             return (
                 "Welcome to Medikah! I'm here to help you connect with a doctor. "
-                "To get started, could you share your name?"
-            )
-        elif stage == ConversationStage.COLLECT_NAME:
-            return (
-                f"Thank you, {intake.patient_name}. What's the best email to "
-                "send appointment details to?"
-            )
-        elif stage == ConversationStage.COLLECT_EMAIL:
-            return (
-                "Got it. Could you tell me what you're feeling and what you'd "
-                "like the doctor to help with today?"
+                "What brings you in today? How are you feeling?"
             )
         elif stage == ConversationStage.COLLECT_SYMPTOMS:
+            return (
+                "Thank you for sharing that. Could you tell me a bit more about "
+                "what you're experiencing?"
+            )
+        elif stage == ConversationStage.COLLECT_HISTORY:
             return (
                 "Thanks for sharing that. When did these symptoms begin, and "
                 "have they been getting better, worse, or about the same?"
             )
-        elif stage == ConversationStage.COLLECT_HISTORY:
+        elif stage == ConversationStage.COLLECT_NAME:
             return (
-                "Understood. When would you like to connect with our on-call "
-                "doctor via telemedicine? You can share a date and time."
+                "Thank you for telling me about that. To help connect you with "
+                "our doctor, could I get your name?"
+            )
+        elif stage == ConversationStage.COLLECT_EMAIL:
+            return (
+                f"Thank you, {intake.patient_name}. What's the best email to "
+                "send your appointment details to?"
             )
         elif stage == ConversationStage.COLLECT_TIMING:
+            return (
+                "Great. When would you like to schedule your Medikah visit? "
+                "You can share a date and time."
+            )
+        elif stage == ConversationStage.CONFIRM_SUMMARY:
             summary = self.build_summary(state)
             return (
                 f"Here is what I've gathered so far:\n{summary}\n\n"
                 "Does that summary look right? Let me know if anything needs an edit."
             )
-        elif stage == ConversationStage.CONFIRM_SUMMARY:
-            return (
-                "Perfect. Would you like me to book a telemedicine visit "
-                f"with {self._on_call_doctor_name}? It's a secure Doxy.me call."
-            )
         elif stage == ConversationStage.CONFIRM_APPOINTMENT:
             return (
-                "Great! Let me finalize that booking. I'll share the "
-                "appointment details in just a moment."
+                "Perfect. Would you like me to book your Medikah visit "
+                f"with {self._on_call_doctor_name}?"
             )
         elif stage == ConversationStage.SCHEDULED:
             return (
-                "You're set! Feel free to ask any other questions while "
-                "you wait for the visit."
+                "You're all set! You'll receive an email with your appointment "
+                "details. Feel free to ask any other questions."
             )
         else:
             return (
@@ -273,8 +273,22 @@ class TriageConversationEngine:
             intake.locale_preference = locale
 
         # ---- State machine: extract data and advance stage ----
+        # Flow: WELCOME → COLLECT_SYMPTOMS → COLLECT_HISTORY → COLLECT_NAME
+        #       → COLLECT_EMAIL → COLLECT_TIMING → CONFIRM → SCHEDULE
 
         if state.stage == ConversationStage.WELCOME:
+            state.stage = ConversationStage.COLLECT_SYMPTOMS
+
+        elif state.stage == ConversationStage.COLLECT_SYMPTOMS:
+            intake.symptom_overview = text
+            intake.notes.append(f"symptom_overview: {text}")
+            state.stage = ConversationStage.COLLECT_HISTORY
+
+        elif state.stage == ConversationStage.COLLECT_HISTORY:
+            existing = intake.symptom_history or ""
+            combined = f"{existing}\n{text}".strip() if existing else text
+            intake.symptom_history = combined
+            intake.notes.append(f"symptom_history: {text}")
             state.stage = ConversationStage.COLLECT_NAME
 
         elif state.stage == ConversationStage.COLLECT_NAME:
@@ -287,22 +301,10 @@ class TriageConversationEngine:
                 validation = validate_email(text, check_deliverability=False)
                 intake.patient_email = validation.normalized
                 intake.notes.append(f"email_raw: {text}")
-                state.stage = ConversationStage.COLLECT_SYMPTOMS
+                state.stage = ConversationStage.COLLECT_TIMING
             except EmailNotValidError:
                 # Stay at COLLECT_EMAIL — AI will ask nicely to retry
                 pass
-
-        elif state.stage == ConversationStage.COLLECT_SYMPTOMS:
-            intake.symptom_overview = text
-            intake.notes.append(f"symptom_overview: {text}")
-            state.stage = ConversationStage.COLLECT_HISTORY
-
-        elif state.stage == ConversationStage.COLLECT_HISTORY:
-            existing = intake.symptom_history or ""
-            combined = f"{existing}\n{text}".strip() if existing else text
-            intake.symptom_history = combined
-            intake.notes.append(f"symptom_history: {text}")
-            state.stage = ConversationStage.COLLECT_TIMING
 
         elif state.stage == ConversationStage.COLLECT_TIMING:
             appointment_dt = _parse_preferred_time(text)
