@@ -6,3 +6,6 @@ openai
 python-dotenv
 sendgrid
 email-validator
+python-dateutil
+slowapi
+supabase
