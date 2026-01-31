@@ -1,4 +1,12 @@
-# Node.js
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Node.js (for Netlify functions)
 node_modules/
 dist/
 build/
@@ -21,21 +29,4 @@ yarn.lock
 
 # Logs
 logs/
-*.log
-
-# OS / editor
-.DS_Store
-.vscode/
-.idea/
-
-# Env / secrets
-.env
-.env.*
-!.env.example
-
-# Node build / logs
-node_modules/
-dist/
-build/
-.cache/
 *.log
