@@ -77,16 +77,40 @@ def _has_word(text: str, words: Iterable[str]) -> bool:
     return any(word in lowered for word in words)
 
 
+_RELATIVE_TIME_MAP = {
+    "tomorrow": 1, "mañana": 1,
+    "today": 0, "hoy": 0,
+    "next week": 7, "la próxima semana": 7, "proxima semana": 7,
+    "in two days": 2, "en dos días": 2, "en dos dias": 2,
+    "in three days": 3, "en tres días": 3, "en tres dias": 3,
+}
+
+
 def _parse_preferred_time(raw: str) -> Optional[datetime]:
     text = raw.strip()
     if not text:
         return None
+
+    lowered = text.lower()
+
+    # Handle relative time expressions
+    for phrase, days_offset in _RELATIVE_TIME_MAP.items():
+        if phrase in lowered:
+            from datetime import timedelta
+            dt = datetime.now(timezone.utc).replace(
+                hour=10, minute=0, second=0, microsecond=0
+            ) + timedelta(days=days_offset)
+            logger.info("Parsed relative time %r → %s", text, dt.isoformat())
+            return dt
+
     try:
         dt = dt_parser.parse(text, fuzzy=True)
     except (ValueError, dt_parser.ParserError):
+        logger.info("Failed to parse time from: %r", text)
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
+    logger.info("Parsed time %r → %s", text, dt.isoformat())
     return dt.astimezone(timezone.utc)
 
 
