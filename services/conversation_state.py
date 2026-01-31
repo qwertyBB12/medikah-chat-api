@@ -50,6 +50,13 @@ class IntakeHistory:
     appointment_confirmed_at: Optional[datetime] = None
     notes: List[str] = field(default_factory=list)
     education_shared: bool = False
+    message_history: List[dict] = field(default_factory=list)
+
+    def add_message(self, role: str, content: str, max_history: int = 20) -> None:
+        """Append a message to conversation history, trimming to max length."""
+        self.message_history.append({"role": role, "content": content})
+        if len(self.message_history) > max_history:
+            self.message_history = self.message_history[-max_history:]
 
     def summary_lines(self) -> List[str]:
         """Render the captured details for emails or logging."""
@@ -125,6 +132,7 @@ class ConversationStateStore:
             "appointment_confirmed_at": intake.appointment_confirmed_at.isoformat() if intake.appointment_confirmed_at else None,
             "notes": intake.notes,
             "education_shared": intake.education_shared,
+            "message_history": intake.message_history,
             "created_at": state.created_at.isoformat(),
             "updated_at": state.updated_at.isoformat(),
         }
@@ -154,6 +162,7 @@ class ConversationStateStore:
             appointment_confirmed_at=confirmed_at,
             notes=notes,
             education_shared=row.get("education_shared", False),
+            message_history=row.get("message_history") or [],
         )
 
         return ConversationState(

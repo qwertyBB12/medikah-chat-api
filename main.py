@@ -24,6 +24,7 @@ from services.conversation_state import (
     ConversationStateStore,
     IntakeHistory,
 )
+from services.ai_triage import AITriageResponseGenerator, TriagePromptBuilder
 from services.notifications import NotificationMessage, NotificationService
 from services.triage import TriageAction, TriageConversationEngine
 from utils.scheduling import (
@@ -176,10 +177,27 @@ notification_service: NotificationService = NotificationService(
 )
 
 conversation_store = ConversationStateStore()
+
+# AI response generation (graceful: None if OpenAI unavailable)
+ai_responder = None
+if openai_client:
+    _prompt_builder = TriagePromptBuilder(
+        on_call_doctor_name=ON_CALL_DOCTOR_NAME,
+        doxy_room_url=DOXY_ROOM_URL or (DOXY_BASE_URL or ""),
+    )
+    ai_responder = AITriageResponseGenerator(
+        openai_client=openai_client,
+        prompt_builder=_prompt_builder,
+    )
+    logger.info("AI triage response generation enabled.")
+else:
+    logger.warning("AI triage disabled; using hardcoded responses.")
+
 triage_engine = TriageConversationEngine(
     conversation_store,
     on_call_doctor_name=ON_CALL_DOCTOR_NAME,
     doxy_room_url=DOXY_ROOM_URL or (DOXY_BASE_URL or ""),
+    ai_responder=ai_responder,
 )
 
 
@@ -493,7 +511,7 @@ async def chat_endpoint(request: Request, req: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
     try:
-        triage_result = triage_engine.process_message(
+        triage_result = await triage_engine.process_message(
             req.session_id, message, locale=req.locale
         )
     except Exception as exc:  # noqa: BLE001 - want a clean HTTP error for clients
@@ -508,19 +526,6 @@ async def chat_endpoint(request: Request, req: ChatRequest) -> ChatResponse:
     appointment_confirmed = triage_result.appointment_confirmed
 
     state = conversation_store.get(triage_result.session_id)
-
-    if (
-        state is not None
-        and not state.intake.education_shared
-        and state.intake.symptom_overview
-        and triage_result.stage
-        in {ConversationStage.COLLECT_TIMING, ConversationStage.CONFIRM_SUMMARY}
-    ):
-        brief = await _build_symptom_brief(state.intake)
-        if brief:
-            reply_text = f"{reply_text}\n\n{brief}"
-            state.intake.education_shared = True
-            conversation_store.update(state)
 
     if triage_result.should_schedule and state is not None:
         schedule_message, schedule_actions, appointment_confirmed = await finalize_chat_scheduling(

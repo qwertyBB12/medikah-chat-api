@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
     appointment_confirmed_at TIMESTAMPTZ,
     notes JSONB NOT NULL DEFAULT '[]',
     education_shared BOOLEAN NOT NULL DEFAULT FALSE,
+    message_history JSONB NOT NULL DEFAULT '[]',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
