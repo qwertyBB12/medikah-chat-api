@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional
+from typing import TYPE_CHECKING, Iterable, List, Optional
 
 from dateutil import parser as dt_parser
 from email_validator import EmailNotValidError, validate_email
@@ -16,6 +16,9 @@ from services.conversation_state import (
     ConversationState,
     ConversationStateStore,
 )
+
+if TYPE_CHECKING:
+    from services.ai_triage import AITriageResponseGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +37,29 @@ EMERGENCY_KEYWORDS = (
     "heart attack",
     "severe pain",
     "numbness",
+    # Spanish equivalents
+    "dolor de pecho",
+    "falta de aire",
+    "dificultad para respirar",
+    "sangrado",
+    "inconsciente",
+    "no puedo respirar",
+    "sobredosis",
+    "derrame",
+    "infarto",
+    "dolor severo",
+    "dolor intenso",
+    "entumecimiento",
 )
 
-AFFIRMATIVE_WORDS = ("yes", "yep", "yeah", "affirmative", "please", "sure", "ok", "okay")
-NEGATIVE_WORDS = ("no", "nope", "nah", "not now", "later")
+AFFIRMATIVE_WORDS = (
+    "yes", "yep", "yeah", "affirmative", "please", "sure", "ok", "okay",
+    "sí", "si", "claro", "por favor", "dale", "de acuerdo", "está bien",
+)
+NEGATIVE_WORDS = (
+    "no", "nope", "nah", "not now", "later",
+    "no gracias", "ahora no", "después", "luego",
+)
 
 
 def _detect_emergency(text: str) -> bool:
@@ -99,10 +121,12 @@ class TriageConversationEngine:
         *,
         on_call_doctor_name: str,
         doxy_room_url: str,
+        ai_responder: Optional[AITriageResponseGenerator] = None,
     ) -> None:
         self._store = store
         self._on_call_doctor_name = on_call_doctor_name
         self._doxy_room_url = doxy_room_url
+        self._ai_responder = ai_responder
 
     def begin_or_resume(
         self, session_id: Optional[str]
@@ -118,7 +142,6 @@ class TriageConversationEngine:
 
     def build_summary(self, state: ConversationState) -> str:
         lines = [
-            "Here is what I've gathered so far:",
             f"• Name: {state.intake.patient_name or '—'}",
             f"• Contact email: {state.intake.patient_email or '—'}",
             f"• Primary concern: {state.intake.symptom_overview or '—'}",
@@ -135,7 +158,71 @@ class TriageConversationEngine:
             )
         return "\n".join(lines)
 
-    def process_message(
+    # ------------------------------------------------------------------
+    # Fallback responses (used when AI is unavailable)
+    # ------------------------------------------------------------------
+
+    def _fallback_response(
+        self, stage: ConversationStage, state: ConversationState
+    ) -> str:
+        intake = state.intake
+        if stage == ConversationStage.WELCOME:
+            return (
+                "Welcome to Medikah! I'm here to help you connect with a doctor. "
+                "To get started, could you share your name?"
+            )
+        elif stage == ConversationStage.COLLECT_NAME:
+            return (
+                f"Thank you, {intake.patient_name}. What's the best email to "
+                "send appointment details to?"
+            )
+        elif stage == ConversationStage.COLLECT_EMAIL:
+            return (
+                "Got it. Could you tell me what you're feeling and what you'd "
+                "like the doctor to help with today?"
+            )
+        elif stage == ConversationStage.COLLECT_SYMPTOMS:
+            return (
+                "Thanks for sharing that. When did these symptoms begin, and "
+                "have they been getting better, worse, or about the same?"
+            )
+        elif stage == ConversationStage.COLLECT_HISTORY:
+            return (
+                "Understood. When would you like to connect with our on-call "
+                "doctor via telemedicine? You can share a date and time."
+            )
+        elif stage == ConversationStage.COLLECT_TIMING:
+            summary = self.build_summary(state)
+            return (
+                f"Here is what I've gathered so far:\n{summary}\n\n"
+                "Does that summary look right? Let me know if anything needs an edit."
+            )
+        elif stage == ConversationStage.CONFIRM_SUMMARY:
+            return (
+                "Perfect. Would you like me to book a telemedicine visit "
+                f"with {self._on_call_doctor_name}? It's a secure Doxy.me call."
+            )
+        elif stage == ConversationStage.CONFIRM_APPOINTMENT:
+            return (
+                "Great! Let me finalize that booking. I'll share the "
+                "appointment details in just a moment."
+            )
+        elif stage == ConversationStage.SCHEDULED:
+            return (
+                "You're set! Feel free to ask any other questions while "
+                "you wait for the visit."
+            )
+        else:
+            return (
+                "I'm here if you have more questions about your symptoms or "
+                "next steps."
+            )
+
+    # ------------------------------------------------------------------
+    # Main conversation processing
+    # ------------------------------------------------------------------
+
+    async def process_message(
         self, session_id: Optional[str], message: str, *, locale: Optional[str] = None
     ) -> TriageResult:
         state = self.begin_or_resume(session_id)
@@ -153,19 +240,30 @@ class TriageConversationEngine:
                 session_id=state.session_id,
             )
 
+        # Emergency detection (keyword-based safety net — always runs)
         if _detect_emergency(text):
             intake.emergency_flag = True
             intake.notes.append(f"emergency_flagged: {text}")
             state.stage = ConversationStage.EMERGENCY_ESCALATED
-            state.touch()
-            self._store.update(state)
-            return TriageResult(
-                reply=(
+            # Generate AI emergency response or use fallback
+            response = None
+            if self._ai_responder:
+                response = await self._ai_responder.generate_response(
+                    text, state.stage, intake, locale
+                )
+            if not response:
+                response = (
                     "Your symptoms sound urgent. Please call your local "
                     "emergency number or go to the nearest emergency room "
                     "immediately. I'll pause scheduling and remain here if "
                     "you need non-urgent information."
-                ),
+                )
+            intake.add_message("user", text)
+            intake.add_message("assistant", response)
+            state.touch()
+            self._store.update(state)
+            return TriageResult(
+                reply=response,
                 stage=state.stage,
                 session_id=state.session_id,
                 emergency_noted=True,
@@ -174,145 +272,90 @@ class TriageConversationEngine:
         if locale and not intake.locale_preference:
             intake.locale_preference = locale
 
+        # ---- State machine: extract data and advance stage ----
+
         if state.stage == ConversationStage.WELCOME:
             state.stage = ConversationStage.COLLECT_NAME
-            response = (
-                "Welcome to Medikah! I'm here to help you connect with a doctor. "
-                "To get started, could you share your name?"
-            )
+
         elif state.stage == ConversationStage.COLLECT_NAME:
             intake.patient_name = _sanitize_name(text)
             intake.notes.append(f"name_raw: {text}")
             state.stage = ConversationStage.COLLECT_EMAIL
-            response = (
-                f"Thank you, {intake.patient_name}. What's the best email to "
-                "send appointment details to?"
-            )
+
         elif state.stage == ConversationStage.COLLECT_EMAIL:
             try:
                 validation = validate_email(text, check_deliverability=False)
                 intake.patient_email = validation.normalized
                 intake.notes.append(f"email_raw: {text}")
+                state.stage = ConversationStage.COLLECT_SYMPTOMS
             except EmailNotValidError:
-                return TriageResult(
-                    reply=(
-                        "I want to be sure the doctor can reach you. Could you "
-                        "enter a valid email address?"
-                    ),
-                    stage=state.stage,
-                    session_id=state.session_id,
-                )
-            state.stage = ConversationStage.COLLECT_SYMPTOMS
-            response = (
-                "Got it. Could you tell me what you're feeling and what you'd "
-                "like the doctor to help with today?"
-            )
+                # Stay at COLLECT_EMAIL — AI will ask nicely to retry
+                pass
+
         elif state.stage == ConversationStage.COLLECT_SYMPTOMS:
             intake.symptom_overview = text
             intake.notes.append(f"symptom_overview: {text}")
             state.stage = ConversationStage.COLLECT_HISTORY
-            response = (
-                "Thanks for sharing that. When did these symptoms begin, and "
-                "have they been getting better, worse, or about the same?"
-            )
+
         elif state.stage == ConversationStage.COLLECT_HISTORY:
             existing = intake.symptom_history or ""
             combined = f"{existing}\n{text}".strip() if existing else text
             intake.symptom_history = combined
             intake.notes.append(f"symptom_history: {text}")
             state.stage = ConversationStage.COLLECT_TIMING
-            response = (
-                "Understood. When would you like to connect with our on-call "
-                "doctor via telemedicine? You can share a date and time."
-            )
+
         elif state.stage == ConversationStage.COLLECT_TIMING:
             appointment_dt = _parse_preferred_time(text)
-            if appointment_dt is None:
-                return TriageResult(
-                    reply=(
-                        "Thanks. Could you share the date and time in a format "
-                        "like '2025-10-23 17:00' so I can lock it in?"
-                    ),
-                    stage=state.stage,
-                    session_id=state.session_id,
-                )
-            intake.preferred_time_utc = appointment_dt
-            intake.notes.append(f"preferred_time_input: {text}")
-            state.stage = ConversationStage.CONFIRM_SUMMARY
-            summary = self.build_summary(state)
-            response = (
-                f"{summary}\n\nDoes that summary look right? Let me know if "
-                "anything needs an edit."
-            )
+            if appointment_dt is not None:
+                intake.preferred_time_utc = appointment_dt
+                intake.notes.append(f"preferred_time_input: {text}")
+                state.stage = ConversationStage.CONFIRM_SUMMARY
+            # If parse fails, stay at COLLECT_TIMING — AI will ask to retry
+
         elif state.stage == ConversationStage.CONFIRM_SUMMARY:
             intake.notes.append(f"summary_feedback: {text}")
             if _has_word(text, AFFIRMATIVE_WORDS):
                 state.stage = ConversationStage.CONFIRM_APPOINTMENT
-                response = (
-                    "Perfect. Would you like me to book a telemedicine visit "
-                    f"with {self._on_call_doctor_name}? It's a secure Doxy.me "
-                    "call."
-                )
-            elif "name" in text.lower():
+            elif "name" in text.lower() or "nombre" in text.lower():
                 state.stage = ConversationStage.COLLECT_NAME
-                response = "No problem—what name should I use instead?"
-            elif "email" in text.lower():
+            elif "email" in text.lower() or "correo" in text.lower():
                 state.stage = ConversationStage.COLLECT_EMAIL
-                response = "Understood. What's the correct email address?"
                 intake.patient_email = None
-            elif "time" in text.lower() or "date" in text.lower():
+            elif any(w in text.lower() for w in ("time", "date", "hora", "fecha")):
                 state.stage = ConversationStage.COLLECT_TIMING
-                response = (
-                    "Sure thing. What date and time works best for you?"
-                )
                 intake.preferred_time_utc = None
-            else:
-                response = (
-                    "Thanks for clarifying. Tell me what you'd like to update "
-                    "— name, email, symptoms, or timing — and I'll adjust."
-                )
+            # Otherwise stay at CONFIRM_SUMMARY — AI will ask what to update
+
         elif state.stage == ConversationStage.CONFIRM_APPOINTMENT:
             intake.notes.append(f"appointment_decision: {text}")
             if _has_word(text, AFFIRMATIVE_WORDS):
-                if intake.appointment_id:
-                    response = (
-                        "You're already booked. If you need to make changes, "
-                        "let me know."
-                    )
-                else:
-                    response = (
-                        "Great! Let me finalize that booking. I'll share the "
-                        "appointment details in just a moment."
-                    )
                 state.stage = ConversationStage.SCHEDULED
                 should_schedule = intake.appointment_id is None
             elif _has_word(text, NEGATIVE_WORDS):
                 state.stage = ConversationStage.FOLLOW_UP
-                response = (
-                    "All right—I'll hold off on scheduling. Let me know if "
-                    "you'd like more guidance or resources."
-                )
-            else:
-                response = (
-                    "I'll wait for a yes or no. Would you like me to schedule "
-                    "the telemedicine visit?"
-                )
-        elif state.stage == ConversationStage.SCHEDULED:
-            if intake.appointment_id:
-                response = (
-                    "You're set! Feel free to ask any other questions while "
-                    "you wait for the visit."
-                )
-            else:
-                response = (
-                    "I'm still wrapping up the scheduling details. Give me a "
-                    "moment and I'll confirm everything shortly."
-                )
-        else:  # FOLLOW_UP, COMPLETED, EMERGENCY_ESCALATED
-            response = (
-                "I'm here if you have more questions about your symptoms or "
-                "next steps."
+            # Otherwise stay — AI will re-ask
+
+        # ---- Generate response ----
+
+        # For CONFIRM_SUMMARY, inject the summary data so the AI can present it
+        ai_context = text
+        if state.stage == ConversationStage.CONFIRM_SUMMARY and intake.preferred_time_utc:
+            summary = self.build_summary(state)
+            ai_context = f"{text}\n\n[SYSTEM: Here is the intake summary to present to the patient:\n{summary}]"
+
+        response = None
+        if self._ai_responder:
+            response = await self._ai_responder.generate_response(
+                ai_context, state.stage, intake, locale
             )
+
+        if not response:
+            # Fallback: use the stage AFTER transition for the response
+            response = self._fallback_response(state.stage, state)
+
+        # Track message history
+        intake.add_message("user", text)
+        intake.add_message("assistant", response)
 
         state.touch()
         self._store.update(state)
