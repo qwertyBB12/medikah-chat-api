@@ -541,13 +541,23 @@ async def chat_endpoint(request: Request, req: ChatRequest) -> ChatResponse:
         triage_result.should_schedule, state is not None,
     )
     if triage_result.should_schedule and state is not None:
-        schedule_message, schedule_actions, appointment_confirmed = await finalize_chat_scheduling(
-            state
-        )
-        if schedule_message:
-            reply_text = f"{reply_text}\n\n{schedule_message}"
-        if schedule_actions:
-            actions.extend(schedule_actions)
+        try:
+            schedule_message, schedule_actions, appointment_confirmed = await finalize_chat_scheduling(
+                state
+            )
+            if schedule_message:
+                reply_text = f"{reply_text}\n\n{schedule_message}"
+            if schedule_actions:
+                actions.extend(schedule_actions)
+        except Exception as exc:
+            logger.exception(
+                "finalize_chat_scheduling FAILED for session %s: %s",
+                triage_result.session_id, exc,
+            )
+            reply_text = (
+                f"{reply_text}\n\nI wasn't able to complete the scheduling just now. "
+                "Please try again or contact us directly."
+            )
 
     if (
         state is not None
