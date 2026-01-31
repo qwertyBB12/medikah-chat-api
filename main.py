@@ -610,13 +610,25 @@ def ping() -> dict[str, str]:
 
 
 @app.get("/health")
-def health() -> dict:
+async def health() -> dict:
     """Health check endpoint with diagnostics."""
+    ai_test = None
+    if openai_client:
+        try:
+            completion = await openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Say hello in 3 words"}],
+                max_tokens=20,
+            )
+            ai_test = completion.choices[0].message.content.strip() if completion.choices else "empty"
+        except Exception as exc:
+            ai_test = f"ERROR: {exc}"
     return {
         "status": "ok",
         "openai_client": openai_client is not None,
         "ai_responder": ai_responder is not None,
         "supabase": conversation_store._use_db,
         "sandbox_mode": SENDGRID_SANDBOX_MODE,
+        "ai_test": ai_test,
     }
 
