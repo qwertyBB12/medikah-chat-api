@@ -408,12 +408,20 @@ async def finalize_chat_scheduling(
         locale_preference=intake.locale_preference,
     )
 
-    sandbox_mode = os.getenv("SENDGRID_SANDBOX_MODE", "false").lower() == "true"
+    logger.info(
+        "finalize_chat_scheduling: session=%s, name=%s, email=%s, time=%s",
+        state.session_id, intake.patient_name, intake.patient_email,
+        intake.preferred_time_utc,
+    )
     intake_notes = "\n".join(intake.summary_lines() + intake.notes)
 
+    logger.info(
+        "finalize_chat_scheduling: calling _perform_scheduling sandbox_mode=%s",
+        SENDGRID_SANDBOX_MODE,
+    )
     outcome = await _perform_scheduling(
         schedule_payload,
-        sandbox_mode=sandbox_mode,
+        sandbox_mode=SENDGRID_SANDBOX_MODE,
         intake_notes=intake_notes or None,
     )
 
@@ -527,6 +535,11 @@ async def chat_endpoint(request: Request, req: ChatRequest) -> ChatResponse:
 
     state = conversation_store.get(triage_result.session_id)
 
+    logger.info(
+        "Chat endpoint: session=%s stage=%s should_schedule=%s state_found=%s",
+        triage_result.session_id, triage_result.stage,
+        triage_result.should_schedule, state is not None,
+    )
     if triage_result.should_schedule and state is not None:
         schedule_message, schedule_actions, appointment_confirmed = await finalize_chat_scheduling(
             state
