@@ -347,12 +347,22 @@ class TriageConversationEngine:
 
         response = None
         if self._ai_responder:
+            logger.info(
+                "Calling AI responder for session %s, stage %s",
+                state.session_id, state.stage,
+            )
             response = await self._ai_responder.generate_response(
                 ai_context, state.stage, intake, locale
             )
+            if response:
+                logger.info("AI response received (%d chars)", len(response))
+            else:
+                logger.warning("AI responder returned None for stage %s", state.stage)
+        else:
+            logger.warning("No AI responder available")
 
         if not response:
-            # Fallback: use the stage AFTER transition for the response
+            logger.info("Using fallback response for stage %s", state.stage)
             response = self._fallback_response(state.stage, state)
 
         # Track message history
