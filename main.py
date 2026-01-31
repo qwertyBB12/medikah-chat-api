@@ -143,15 +143,14 @@ DOXY_ROOM_URL = os.getenv("DOXY_ROOM_URL")
 DOCTOR_NOTIFICATION_EMAIL = os.getenv("DOCTOR_NOTIFICATION_EMAIL")
 ON_CALL_DOCTOR_NAME = os.getenv("ON_CALL_DOCTOR_NAME", "Medikah On-Call Doctor")
 
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-SENDGRID_SENDER_EMAIL = os.getenv("SENDGRID_SENDER_EMAIL")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+RESEND_SENDER_EMAIL = os.getenv("RESEND_SENDER_EMAIL", "Medikah <onboarding@resend.dev>")
 APPOINTMENT_HASH_KEY = os.getenv("APPOINTMENT_HASH_KEY")
 
 missing_envs = [
     name
     for name, value in (
-        ("SENDGRID_API_KEY", SENDGRID_API_KEY),
-        ("SENDGRID_SENDER_EMAIL", SENDGRID_SENDER_EMAIL),
+        ("RESEND_API_KEY", RESEND_API_KEY),
         ("APPOINTMENT_HASH_KEY", APPOINTMENT_HASH_KEY),
     )
     if not value
@@ -163,17 +162,17 @@ if missing_envs:
     )
     raise RuntimeError("Notification service is not configured")
 
-SENDGRID_SANDBOX_MODE_RAW = os.getenv("SENDGRID_SANDBOX_MODE", "false").lower()
-SENDGRID_SANDBOX_MODE = SENDGRID_SANDBOX_MODE_RAW in {"1", "true", "yes", "on"}
+EMAIL_SANDBOX_MODE_RAW = os.getenv("EMAIL_SANDBOX_MODE", "false").lower()
+EMAIL_SANDBOX_MODE = EMAIL_SANDBOX_MODE_RAW in {"1", "true", "yes", "on"}
 APPOINTMENT_DURATION_MINUTES = _resolve_duration_minutes()
 
 appointment_store: Optional[SecureAppointmentStore] = SecureAppointmentStore(
     APPOINTMENT_HASH_KEY
 )
 notification_service: NotificationService = NotificationService(
-    SENDGRID_API_KEY,
-    SENDGRID_SENDER_EMAIL,
-    sandbox_mode=SENDGRID_SANDBOX_MODE,
+    RESEND_API_KEY,
+    RESEND_SENDER_EMAIL,
+    sandbox_mode=EMAIL_SANDBOX_MODE,
 )
 
 conversation_store = ConversationStateStore()
@@ -417,11 +416,11 @@ async def finalize_chat_scheduling(
 
     logger.info(
         "finalize_chat_scheduling: calling _perform_scheduling sandbox_mode=%s",
-        SENDGRID_SANDBOX_MODE,
+        EMAIL_SANDBOX_MODE,
     )
     outcome = await _perform_scheduling(
         schedule_payload,
-        sandbox_mode=SENDGRID_SANDBOX_MODE,
+        sandbox_mode=EMAIL_SANDBOX_MODE,
         intake_notes=intake_notes or None,
     )
 
@@ -604,7 +603,7 @@ async def schedule_endpoint(
             body = req.model_dump()
         logging.info("Incoming /schedule request for appointment at %s", req.appointment_time)
 
-        sandbox_mode = os.getenv("SENDGRID_SANDBOX_MODE", "false").lower() == "true"
+        sandbox_mode = EMAIL_SANDBOX_MODE
         outcome = await _perform_scheduling(
             req,
             sandbox_mode=sandbox_mode,
@@ -651,7 +650,7 @@ async def health() -> dict:
         "openai_client": openai_client is not None,
         "ai_responder": ai_responder is not None,
         "supabase": conversation_store._use_db,
-        "sandbox_mode": SENDGRID_SANDBOX_MODE,
+        "sandbox_mode": EMAIL_SANDBOX_MODE,
         "ai_test": ai_test,
     }
 
