@@ -57,9 +57,11 @@ AFFIRMATIVE_WORDS = (
     "correct", "right", "good", "great", "perfect", "looks good", "that's right",
     "that's correct", "confirm", "go ahead", "do it", "book", "schedule",
     "let's do it", "sounds good", "all good", "fine", "absolutely", "of course",
+    "thanks", "thank you", "that works", "works for me", "let's go", "yup",
     "sí", "si", "claro", "por favor", "dale", "de acuerdo", "está bien",
     "correcto", "bien", "perfecto", "todo bien", "adelante", "confírmalo",
     "agéndalo", "listo", "eso es", "confirmado", "confirmo", "todo listo",
+    "gracias", "eso", "va", "vamos", "sale",
 )
 NEGATIVE_WORDS = (
     "no", "nope", "nah", "not now", "later",
@@ -94,12 +96,22 @@ def _parse_preferred_time(raw: str) -> Optional[datetime]:
     lowered = text.lower()
 
     # Handle relative time expressions
+    from datetime import timedelta
     for phrase, days_offset in _RELATIVE_TIME_MAP.items():
         if phrase in lowered:
-            from datetime import timedelta
-            dt = datetime.now(timezone.utc).replace(
-                hour=10, minute=0, second=0, microsecond=0
-            ) + timedelta(days=days_offset)
+            base_date = datetime.now(timezone.utc) + timedelta(days=days_offset)
+            # Try to extract a time from the rest of the text
+            remaining = lowered.replace(phrase, "").strip()
+            hour = 10  # default to 10am UTC
+            if remaining:
+                try:
+                    parsed_time = dt_parser.parse(remaining, fuzzy=True)
+                    hour = parsed_time.hour
+                except (ValueError, dt_parser.ParserError):
+                    pass
+            dt = base_date.replace(
+                hour=hour, minute=0, second=0, microsecond=0
+            )
             logger.info("Parsed relative time %r → %s", text, dt.isoformat())
             return dt
 
