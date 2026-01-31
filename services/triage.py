@@ -54,7 +54,12 @@ EMERGENCY_KEYWORDS = (
 
 AFFIRMATIVE_WORDS = (
     "yes", "yep", "yeah", "affirmative", "please", "sure", "ok", "okay",
+    "correct", "right", "good", "great", "perfect", "looks good", "that's right",
+    "that's correct", "confirm", "go ahead", "do it", "book", "schedule",
+    "let's do it", "sounds good", "all good", "fine", "absolutely", "of course",
     "sí", "si", "claro", "por favor", "dale", "de acuerdo", "está bien",
+    "correcto", "bien", "perfecto", "todo bien", "adelante", "confírmalo",
+    "agéndalo", "listo", "eso es",
 )
 NEGATIVE_WORDS = (
     "no", "nope", "nah", "not now", "later",
