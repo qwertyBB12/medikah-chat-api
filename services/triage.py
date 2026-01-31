@@ -332,6 +332,10 @@ class TriageConversationEngine:
 
         elif state.stage == ConversationStage.CONFIRM_SUMMARY:
             intake.notes.append(f"summary_feedback: {text}")
+            logger.info(
+                "CONFIRM_SUMMARY: text=%r, affirmative=%s",
+                text, _has_word(text, AFFIRMATIVE_WORDS),
+            )
             if _has_word(text, AFFIRMATIVE_WORDS):
                 state.stage = ConversationStage.CONFIRM_APPOINTMENT
             elif "name" in text.lower() or "nombre" in text.lower():
@@ -346,6 +350,10 @@ class TriageConversationEngine:
 
         elif state.stage == ConversationStage.CONFIRM_APPOINTMENT:
             intake.notes.append(f"appointment_decision: {text}")
+            logger.info(
+                "CONFIRM_APPOINTMENT: text=%r, affirmative=%s, negative=%s",
+                text, _has_word(text, AFFIRMATIVE_WORDS), _has_word(text, NEGATIVE_WORDS),
+            )
             if _has_word(text, AFFIRMATIVE_WORDS):
                 state.stage = ConversationStage.SCHEDULED
                 should_schedule = intake.appointment_id is None
