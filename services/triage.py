@@ -59,7 +59,7 @@ AFFIRMATIVE_WORDS = (
     "let's do it", "sounds good", "all good", "fine", "absolutely", "of course",
     "sí", "si", "claro", "por favor", "dale", "de acuerdo", "está bien",
     "correcto", "bien", "perfecto", "todo bien", "adelante", "confírmalo",
-    "agéndalo", "listo", "eso es",
+    "agéndalo", "listo", "eso es", "confirmado", "confirmo", "todo listo",
 )
 NEGATIVE_WORDS = (
     "no", "nope", "nah", "not now", "later",
