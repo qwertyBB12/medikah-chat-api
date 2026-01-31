@@ -4,7 +4,7 @@ requests
 python-multipart
 openai
 python-dotenv
-sendgrid
+resend
 email-validator
 python-dateutil
 slowapi
