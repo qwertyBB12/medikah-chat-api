@@ -44,6 +44,7 @@ class IntakeHistory:
     symptom_overview: Optional[str] = None
     symptom_history: Optional[str] = None
     preferred_time_utc: Optional[datetime] = None
+    patient_timezone: Optional[str] = None
     locale_preference: Optional[str] = None
     emergency_flag: bool = False
     appointment_id: Optional[str] = None
@@ -126,6 +127,7 @@ class ConversationStateStore:
             "symptom_overview": intake.symptom_overview,
             "symptom_history": intake.symptom_history,
             "preferred_time_utc": intake.preferred_time_utc.isoformat() if intake.preferred_time_utc else None,
+            "patient_timezone": intake.patient_timezone,
             "locale_preference": intake.locale_preference,
             "emergency_flag": intake.emergency_flag,
             "appointment_id": intake.appointment_id,
@@ -156,6 +158,7 @@ class ConversationStateStore:
             symptom_overview=row.get("symptom_overview"),
             symptom_history=row.get("symptom_history"),
             preferred_time_utc=preferred_time,
+            patient_timezone=row.get("patient_timezone"),
             locale_preference=row.get("locale_preference"),
             emergency_flag=row.get("emergency_flag", False),
             appointment_id=row.get("appointment_id"),

@@ -13,12 +13,22 @@ REQUIRED_KEYS = [
     "APPOINTMENT_HASH_KEY",
 ]
 
+OPTIONAL_KEYS = [
+    "DOXY_ROOM_URL",
+    "ON_CALL_DOCTOR_NAME",
+]
+
 
 def main() -> None:
     load_dotenv()
     for key in REQUIRED_KEYS:
         value = os.getenv(key)
         status = "SET" if value else "MISSING"
+        print(f"{key}: {status}")
+
+    for key in OPTIONAL_KEYS:
+        value = os.getenv(key)
+        status = "SET" if value else "MISSING (optional)"
         print(f"{key}: {status}")
 
 
