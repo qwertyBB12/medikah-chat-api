@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Iterable, List, Optional
 
 from dateutil import parser as dt_parser
 from email_validator import EmailNotValidError, validate_email
+from zoneinfo import ZoneInfo
 
 from services.conversation_state import (
     ConversationStage,
@@ -88,21 +89,33 @@ _RELATIVE_TIME_MAP = {
 }
 
 
-def _parse_preferred_time(raw: str) -> Optional[datetime]:
+def _resolve_tz(tz_name: Optional[str]) -> ZoneInfo:
+    """Return a ZoneInfo for the given IANA timezone name, defaulting to UTC."""
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except (KeyError, ValueError):
+            logger.warning("Unknown timezone %r, falling back to UTC", tz_name)
+    return ZoneInfo("UTC")
+
+
+def _parse_preferred_time(raw: str, tz_name: Optional[str] = None) -> Optional[datetime]:
     text = raw.strip()
     if not text:
         return None
 
+    patient_tz = _resolve_tz(tz_name)
     lowered = text.lower()
 
     # Handle relative time expressions
     from datetime import timedelta
     for phrase, days_offset in _RELATIVE_TIME_MAP.items():
         if phrase in lowered:
-            base_date = datetime.now(timezone.utc) + timedelta(days=days_offset)
-            # Try to extract a time from the rest of the text
+            # Use patient's local "now" for relative dates
+            local_now = datetime.now(patient_tz)
+            base_date = local_now + timedelta(days=days_offset)
             remaining = lowered.replace(phrase, "").strip()
-            hour = 10  # default to 10am UTC
+            hour = 10  # default to 10am local
             if remaining:
                 try:
                     parsed_time = dt_parser.parse(remaining, fuzzy=True)
@@ -112,17 +125,18 @@ def _parse_preferred_time(raw: str) -> Optional[datetime]:
             dt = base_date.replace(
                 hour=hour, minute=0, second=0, microsecond=0
             )
-            logger.info("Parsed relative time %r → %s", text, dt.isoformat())
-            return dt
+            logger.info("Parsed relative time %r → %s (tz=%s)", text, dt.isoformat(), patient_tz)
+            return dt.astimezone(timezone.utc)
 
     try:
         dt = dt_parser.parse(text, fuzzy=True)
     except (ValueError, dt_parser.ParserError):
         logger.info("Failed to parse time from: %r", text)
         return None
+    # If no timezone in the parsed result, assume patient's local timezone
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    logger.info("Parsed time %r → %s", text, dt.isoformat())
+        dt = dt.replace(tzinfo=patient_tz)
+    logger.info("Parsed time %r → %s (tz=%s)", text, dt.isoformat(), patient_tz)
     return dt.astimezone(timezone.utc)
 
 
@@ -264,7 +278,7 @@ class TriageConversationEngine:
     # ------------------------------------------------------------------
 
     async def process_message(
-        self, session_id: Optional[str], message: str, *, locale: Optional[str] = None
+        self, session_id: Optional[str], message: str, *, locale: Optional[str] = None, timezone: Optional[str] = None
     ) -> TriageResult:
         state = self.begin_or_resume(session_id)
         intake = state.intake
@@ -309,6 +323,10 @@ class TriageConversationEngine:
                 session_id=state.session_id,
                 emergency_noted=True,
             )
+
+        # Store patient timezone if provided
+        if timezone and not intake.patient_timezone:
+            intake.patient_timezone = timezone
 
         # Auto-detect language from user text if not yet set
         if not intake.locale_preference:
@@ -359,7 +377,7 @@ class TriageConversationEngine:
                 pass
 
         elif state.stage == ConversationStage.COLLECT_TIMING:
-            appointment_dt = _parse_preferred_time(text)
+            appointment_dt = _parse_preferred_time(text, intake.patient_timezone)
             if appointment_dt is not None:
                 intake.preferred_time_utc = appointment_dt
                 intake.notes.append(f"preferred_time_input: {text}")

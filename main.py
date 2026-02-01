@@ -81,6 +81,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = Field(default=None, max_length=120)
     locale: Optional[str] = Field(default=None, max_length=16)
+    timezone: Optional[str] = Field(default=None, max_length=64)
 
 
 class ChatResponse(BaseModel):
@@ -105,6 +106,7 @@ class ScheduleRequest(BaseModel):
     appointment_time: datetime
     symptoms: Optional[str] = Field(default=None, max_length=2000)
     locale_preference: Optional[str] = Field(default=None, max_length=120)
+    patient_timezone: Optional[str] = Field(default=None, max_length=64)
 
 
 class ScheduleResponse(BaseModel):
@@ -273,9 +275,18 @@ async def _perform_scheduling(
         record.appointment_id,
     )
 
-    # Format appointment time for display
+    # Format appointment time for display in patient's local timezone
     import base64
-    time_display = appointment_time.strftime("%B %d, %Y at %I:%M %p UTC")
+    from zoneinfo import ZoneInfo
+    patient_tz = ZoneInfo("UTC")
+    if req.patient_timezone:
+        try:
+            patient_tz = ZoneInfo(req.patient_timezone)
+        except (KeyError, ValueError):
+            pass
+    local_time = appointment_time.astimezone(patient_tz)
+    tz_abbr = local_time.strftime("%Z") or "UTC"
+    time_display = local_time.strftime(f"%B %d, %Y at %I:%M %p {tz_abbr}")
 
     # Build ICS calendar attachment
     ics_content = build_ics_content(
@@ -482,6 +493,7 @@ async def finalize_chat_scheduling(
         appointment_time=intake.preferred_time_utc,
         symptoms=symptoms_text,
         locale_preference=intake.locale_preference,
+        patient_timezone=intake.patient_timezone,
     )
 
     logger.info(
@@ -596,7 +608,7 @@ async def chat_endpoint(request: Request, req: ChatRequest) -> ChatResponse:
 
     try:
         triage_result = await triage_engine.process_message(
-            req.session_id, message, locale=req.locale
+            req.session_id, message, locale=req.locale, timezone=req.timezone
         )
     except Exception as exc:  # noqa: BLE001 - want a clean HTTP error for clients
         logger.exception("Triage engine failed for session %s", req.session_id)
