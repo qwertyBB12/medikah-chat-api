@@ -621,8 +621,8 @@ async def chat_endpoint(request: Request, req: ChatRequest) -> ChatResponse:
             schedule_message, schedule_actions, appointment_confirmed = await finalize_chat_scheduling(
                 state
             )
-            if schedule_message:
-                reply_text = f"{reply_text}\n\n{schedule_message}"
+            # Don't append schedule_message — the AI response already
+            # confirms the booking in the patient's language
             if schedule_actions:
                 actions.extend(schedule_actions)
         except Exception as exc:
