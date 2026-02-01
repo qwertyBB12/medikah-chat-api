@@ -25,10 +25,11 @@ from services.conversation_state import (
     IntakeHistory,
 )
 from services.ai_triage import AITriageResponseGenerator, TriagePromptBuilder
-from services.notifications import NotificationMessage, NotificationService
+from services.notifications import EmailAttachment, NotificationMessage, NotificationService
 from services.triage import TriageAction, TriageConversationEngine
 from utils.scheduling import (
     build_google_calendar_link,
+    build_ics_content,
     generate_doxy_link,
 )
 
@@ -272,26 +273,101 @@ async def _perform_scheduling(
         record.appointment_id,
     )
 
+    # Format appointment time for display
+    import base64
+    time_display = appointment_time.strftime("%B %d, %Y at %I:%M %p UTC")
+
+    # Build ICS calendar attachment
+    ics_content = build_ics_content(
+        title=f"Medikah Visit with {assigned_doctor}",
+        description=(
+            f"Secure video consultation with {assigned_doctor}.\n"
+            f"Join here: {doxy_link}"
+        ),
+        start=appointment_time,
+        duration_minutes=APPOINTMENT_DURATION_MINUTES,
+        location=doxy_link,
+    )
+    ics_attachment = EmailAttachment(
+        filename="medikah-appointment.ics",
+        content=base64.b64encode(ics_content.encode("utf-8")).decode("ascii"),
+        content_type="text/calendar",
+    )
+
+    # Patient email — warm, professional, reassuring
     patient_plain_body = (
-        f"Hello {req.patient_name},\n\n"
-        f"Your telehealth appointment with {assigned_doctor} is scheduled for "
-        f"{appointment_time.isoformat()}.\n"
-        f"Join using this secure Medikah link: {doxy_link}\n\n"
-        f"Add the appointment to your calendar: {calendar_link}\n\n"
-        "If you did not request this appointment, please contact us immediately.\n\n"
-        "Thank you,\nMedikah Care Team"
+        f"Hi {req.patient_name},\n\n"
+        f"Great news — your Medikah visit is confirmed!\n\n"
+        f"Here are your appointment details:\n"
+        f"  Doctor: {assigned_doctor}\n"
+        f"  Date & Time: {time_display}\n"
+        f"  How to join: {doxy_link}\n\n"
+        "We've attached a calendar invite to this email so it's right on your "
+        "schedule — just open it and it'll be added automatically.\n\n"
+        "A few things to know before your visit:\n"
+        "  - No downloads needed — just click the link above when it's time\n"
+        "  - Find a quiet, private spot with good internet\n"
+        "  - Have any medications or health records handy if possible\n\n"
+        "If you need to reschedule or have any questions, simply reply to this email "
+        "and our care team will be happy to help.\n\n"
+        "We're looking forward to taking care of you.\n\n"
+        "Warmly,\n"
+        "The Medikah Care Team\n"
     )
-    patient_html_body = (
-        f"<p>Hello {req.patient_name},</p>"
-        f"<p>Your telehealth appointment with {assigned_doctor} is scheduled for "
-        f"<strong>{appointment_time.isoformat()}</strong>.</p>"
-        f"<p>Join using this secure Medikah link: "
-        f'<a href="{doxy_link}">{doxy_link}</a></p>'
-        f'<p>Add the appointment to your calendar: <a href="{calendar_link}">'
-        "Calendar Link</a></p>"
-        "<p>If you did not request this appointment, please contact us immediately.</p>"
-        "<p>Thank you,<br/>Medikah Care Team</p>"
-    )
+    patient_html_body = f"""\
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #2d3748;">
+  <div style="padding: 32px 24px; background: linear-gradient(135deg, #0c3a42 0%, #1a7c8b 100%); border-radius: 12px 12px 0 0;">
+    <h1 style="color: #ffffff; font-size: 24px; margin: 0 0 8px 0; font-weight: 600;">Your Medikah Visit is Confirmed</h1>
+    <p style="color: #e2e8f0; font-size: 15px; margin: 0;">We're looking forward to caring for you.</p>
+  </div>
+
+  <div style="padding: 32px 24px; background: #ffffff; border: 1px solid #e2e8f0; border-top: none;">
+    <p style="font-size: 16px; line-height: 1.6; color: #4a5568;">Hi {req.patient_name},</p>
+
+    <div style="background: #f7fafc; border-left: 4px solid #1a7c8b; padding: 20px; margin: 24px 0; border-radius: 0 8px 8px 0;">
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 6px 0; color: #718096; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Doctor</td>
+          <td style="padding: 6px 0; color: #2d3748; font-size: 15px; font-weight: 500;">{assigned_doctor}</td>
+        </tr>
+        <tr>
+          <td style="padding: 6px 0; color: #718096; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Date & Time</td>
+          <td style="padding: 6px 0; color: #2d3748; font-size: 15px; font-weight: 500;">{time_display}</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="text-align: center; margin: 28px 0;">
+      <a href="{doxy_link}" style="display: inline-block; background: #1a7c8b; color: #ffffff; text-decoration: none; padding: 14px 36px; border-radius: 8px; font-size: 16px; font-weight: 600; letter-spacing: 0.3px;">Join Your Visit</a>
+    </div>
+
+    <p style="font-size: 14px; line-height: 1.6; color: #718096; text-align: center; margin-bottom: 24px;">
+      We've attached a calendar invite — open it to add this appointment to your calendar automatically.
+    </p>
+
+    <div style="border-top: 1px solid #e2e8f0; padding-top: 20px; margin-top: 20px;">
+      <p style="font-size: 14px; font-weight: 600; color: #2d3748; margin-bottom: 12px;">Before your visit:</p>
+      <ul style="font-size: 14px; line-height: 1.8; color: #4a5568; padding-left: 20px;">
+        <li>No downloads needed — just click the link when it's time</li>
+        <li>Find a quiet, private spot with a good connection</li>
+        <li>Have any medications or health records handy</li>
+      </ul>
+    </div>
+
+    <p style="font-size: 14px; line-height: 1.6; color: #4a5568; margin-top: 24px;">
+      Need to reschedule or have questions? Simply reply to this email — our care team is here for you.
+    </p>
+  </div>
+
+  <div style="padding: 20px 24px; background: #f7fafc; border-radius: 0 0 12px 12px; border: 1px solid #e2e8f0; border-top: none; text-align: center;">
+    <p style="font-size: 13px; color: #a0aec0; margin: 0;">
+      Warmly, The Medikah Care Team<br/>
+      <span style="font-size: 11px;">Caring for you across the Americas</span>
+    </p>
+  </div>
+</div>"""
+
+    # Doctor notification
     symptoms_line = (
         f"Primary concern: {req.symptoms.strip()}\n"
         if req.symptoms and req.symptoms.strip()
@@ -304,29 +380,30 @@ async def _perform_scheduling(
     )
     notes_line = f"Intake notes:\n{intake_notes}\n" if intake_notes else ""
     doctor_plain_body = (
-        f"Telehealth appointment scheduled.\n"
-        f"Assigned doctor: {assigned_doctor}\n"
+        f"New Medikah appointment\n"
+        f"Doctor: {assigned_doctor}\n"
         f"Patient: {req.patient_name}\n"
-        f"When: {appointment_time.isoformat()}\n"
+        f"When: {time_display}\n"
         f"{symptoms_line}"
         f"{locale_line}"
         f"{notes_line}"
-        f"Medikah link: {doxy_link}\n"
-        f"Calendar: {calendar_link}\n"
+        f"Visit link: {doxy_link}\n"
     )
 
     messages = [
         NotificationMessage(
             recipient=req.patient_contact,
-            subject="Your upcoming Medikah telehealth appointment",
+            subject=f"Your Medikah visit is confirmed — {time_display}",
             plain_body=patient_plain_body,
             html_body=patient_html_body,
+            attachments=[ics_attachment],
         ),
         NotificationMessage(
             recipient=DOCTOR_NOTIFICATION_EMAIL,
-            subject="New Medikah telehealth appointment scheduled",
+            subject=f"New appointment: {req.patient_name} — {time_display}",
             plain_body=doctor_plain_body,
             html_body=doctor_plain_body.replace("\n", "<br/>"),
+            attachments=[ics_attachment],
         ),
     ]
 

@@ -49,12 +49,12 @@ _STAGE_TASKS = {
     ConversationStage.CONFIRM_SUMMARY: (
         "Present a clear summary of everything collected (symptoms, history, "
         "name, email, preferred time) and ask the patient to confirm it looks correct. "
-        "Let them know they can ask to change any detail."
+        "Let them know they can ask to change any detail. Tell them that once they "
+        "confirm, you'll go ahead and book their secure Medikah video visit right away."
     ),
     ConversationStage.CONFIRM_APPOINTMENT: (
-        "The patient confirmed their summary. Ask if they'd like you to book "
-        "the visit now. Mention it will be a secure Medikah video consultation "
-        "with the doctor."
+        "The patient confirmed their summary. The appointment is being booked. "
+        "Let them know you're scheduling their visit now."
     ),
     ConversationStage.SCHEDULED: (
         "The appointment is booked. Let the patient know they're all set and "
