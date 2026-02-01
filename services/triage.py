@@ -373,7 +373,10 @@ class TriageConversationEngine:
                 text, _has_word(text, AFFIRMATIVE_WORDS),
             )
             if _has_word(text, AFFIRMATIVE_WORDS):
-                state.stage = ConversationStage.CONFIRM_APPOINTMENT
+                state.stage = ConversationStage.SCHEDULED
+                should_schedule = intake.appointment_id is None
+            elif _has_word(text, NEGATIVE_WORDS):
+                state.stage = ConversationStage.FOLLOW_UP
             elif "name" in text.lower() or "nombre" in text.lower():
                 state.stage = ConversationStage.COLLECT_NAME
             elif "email" in text.lower() or "correo" in text.lower():

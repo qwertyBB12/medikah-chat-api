@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
-from dataclasses import dataclass
-from typing import Iterable, Optional
+from dataclasses import dataclass, field
+from typing import Iterable, List, Optional
 
 import resend
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class EmailAttachment:
+    """An email attachment."""
+
+    filename: str
+    content: str  # base64-encoded content
+    content_type: str = "text/calendar"
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +30,7 @@ class NotificationMessage:
     subject: str
     plain_body: str
     html_body: Optional[str] = None
+    attachments: List[EmailAttachment] = field(default_factory=list)
 
 
 class NotificationService:
@@ -58,7 +69,7 @@ class NotificationService:
             logger.debug("[Sandbox] Body: %s", message.plain_body)
             return
 
-        params = {
+        params: dict = {
             "from": self._sender_email,
             "to": [message.recipient],
             "subject": message.subject,
@@ -66,6 +77,15 @@ class NotificationService:
         }
         if message.html_body:
             params["html"] = message.html_body
+        if message.attachments:
+            params["attachments"] = [
+                {
+                    "filename": att.filename,
+                    "content": att.content,
+                    "content_type": att.content_type,
+                }
+                for att in message.attachments
+            ]
 
         logger.info("Sending notification to %s via Resend", message.recipient)
         try:
