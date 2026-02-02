@@ -327,9 +327,9 @@ async def _perform_scheduling(
     )
     patient_html_body = f"""\
 <div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #FAFAFB;">
-  <div style="padding: 40px 48px; background: linear-gradient(135deg, #1B2A41 0%, #243447 100%); border-radius: 12px 12px 0 0; text-align: center;">
+  <div style="padding: 40px 48px; background: #2C7A8C; border-radius: 12px 12px 0 0; text-align: center;">
     <p style="font-size: 24px; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em; margin: 0 0 8px 0;">medikah</p>
-    <p style="color: rgba(255,255,255,0.8); font-size: 15px; margin: 0;">Your visit is confirmed.</p>
+    <p style="color: rgba(255,255,255,0.85); font-size: 15px; margin: 0;">Your visit is confirmed.</p>
   </div>
 
   <div style="padding: 48px; background: #FFFFFF; border: 1px solid rgba(209,213,219,0.3); border-top: none;">
