@@ -22,7 +22,7 @@ def build_ics_content(
     start: datetime,
     duration_minutes: int = 30,
     location: str | None = None,
-    organizer_email: str = "care@medikah.org",
+    organizer_email: str = "care@medikahhealth.com",
 ) -> str:
     """Generate an ICS calendar file as a string.
 
@@ -32,7 +32,7 @@ def build_ics_content(
     start_utc = start.astimezone(timezone.utc)
     end_utc = start_utc + timedelta(minutes=duration_minutes)
     now_utc = datetime.now(timezone.utc)
-    uid = f"{uuid.uuid4()}@medikah.org"
+    uid = f"{uuid.uuid4()}@medikahhealth.com"
 
     def _fmt(dt: datetime) -> str:
         return dt.strftime("%Y%m%dT%H%M%SZ")

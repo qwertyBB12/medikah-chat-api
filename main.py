@@ -387,14 +387,14 @@ async def _perform_scheduling(
       Licensed professionals may review when needed to ensure safe guidance.
     </p>
     <p style="font-size: 13px; line-height: 1.6; color: #4A5568; margin: 0 0 16px 0;">
-      Independent Pan-American Health Infrastructure<br/>Established 2022
+      Medikah Corporation · Incorporated in Delaware, USA
     </p>
     <p style="font-size: 13px; margin: 0;">
-      <a href="https://medikah.org/privacy" style="color: #2C7A8C; text-decoration: none;">Privacy Policy</a>
+      <a href="https://medikahhealth.com/privacy" style="color: #2C7A8C; text-decoration: none;">Privacy Policy</a>
       <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="https://medikah.org/terms" style="color: #2C7A8C; text-decoration: none;">Terms of Service</a>
+      <a href="https://medikahhealth.com/terms" style="color: #2C7A8C; text-decoration: none;">Terms of Service</a>
       <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="mailto:partnerships@medikah.org" style="color: #2C7A8C; text-decoration: none;">Contact</a>
+      <a href="mailto:partnerships@medikahhealth.com" style="color: #2C7A8C; text-decoration: none;">Contact</a>
     </p>
   </div>
 </div>"""
