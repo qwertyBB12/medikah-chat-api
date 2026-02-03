@@ -390,11 +390,11 @@ async def _perform_scheduling(
       Medikah Corporation · Incorporated in Delaware, USA
     </p>
     <p style="font-size: 13px; margin: 0;">
-      <a href="https://medikahhealth.com/privacy" style="color: #2C7A8C; text-decoration: none;">Privacy Policy</a>
+      <a href="https://medikah.health/privacy" style="color: #2C7A8C; text-decoration: none;">Privacy Policy</a>
       <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="https://medikahhealth.com/terms" style="color: #2C7A8C; text-decoration: none;">Terms of Service</a>
+      <a href="https://medikah.health/terms" style="color: #2C7A8C; text-decoration: none;">Terms of Service</a>
       <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="mailto:partnerships@medikahhealth.com" style="color: #2C7A8C; text-decoration: none;">Contact</a>
+      <a href="mailto:partnerships@medikah.health" style="color: #2C7A8C; text-decoration: none;">Contact</a>
     </p>
   </div>
 </div>"""
