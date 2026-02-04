@@ -326,10 +326,20 @@ async def _perform_scheduling(
         "The Medikah Care Team\n"
     )
     patient_html_body = f"""\
-<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #FAFAFB; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(27,42,65,0.08);">
-  <!-- Header with inst-blue background and white logo text -->
-  <div style="background: #1B2A41; padding: 44px 48px; text-align: center;">
-    <p style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 32px; font-weight: 800; color: #FFFFFF; letter-spacing: -0.01em; margin: 0;">medikah</p>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+</head>
+<body style="margin: 0; padding: 0; background-color: #FAFAFB;">
+<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #FFFFFF; border-radius: 12px; overflow: hidden;">
+  <!-- Header - light design with blue accent bar -->
+  <div style="background-color: #FFFFFF; padding: 0; text-align: center; border-bottom: 4px solid #1B2A41;">
+    <div style="padding: 32px 48px;">
+      <p style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 32px; font-weight: 800; color: #1B2A41; letter-spacing: -0.01em; margin: 0;">medikah</p>
+      <p style="font-size: 13px; color: #2C7A8C; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin: 12px 0 0 0;">Visit Confirmed</p>
+    </div>
   </div>
 
   <div style="padding: 48px; background: #FFFFFF;">
@@ -381,24 +391,26 @@ async def _perform_scheduling(
     </div>
   </div>
 
-  <!-- Footer with inst-blue -->
-  <div style="padding: 28px 48px; background: #1B2A41; text-align: center;">
-    <p style="font-size: 12px; line-height: 1.6; color: rgba(255,255,255,0.7); margin: 0 0 12px 0;">
+  <!-- Footer - light with blue accent -->
+  <div style="background-color: #F5F7F8; padding: 28px 48px; text-align: center; border-top: 4px solid #1B2A41;">
+    <p style="font-size: 12px; line-height: 1.6; color: #6B7280; margin: 0 0 12px 0;">
       Your conversations are encrypted and handled with care.<br/>
       Licensed professionals may review when needed to ensure safe guidance.
     </p>
-    <p style="font-size: 12px; line-height: 1.6; color: rgba(255,255,255,0.5); margin: 0 0 16px 0;">
+    <p style="font-size: 12px; line-height: 1.6; color: #9CA3AF; margin: 0 0 16px 0;">
       Medikah Corporation · Incorporated in Delaware, USA
     </p>
     <p style="font-size: 12px; margin: 0;">
-      <a href="https://medikah.health/privacy" style="color: #2C7A8C; text-decoration: none;">Privacy Policy</a>
-      <span style="color: rgba(255,255,255,0.3); margin: 0 8px;">|</span>
-      <a href="https://medikah.health/terms" style="color: #2C7A8C; text-decoration: none;">Terms of Service</a>
-      <span style="color: rgba(255,255,255,0.3); margin: 0 8px;">|</span>
-      <a href="mailto:hello@medikah.health" style="color: #2C7A8C; text-decoration: none;">Contact</a>
+      <a href="https://medikah.health/privacy" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Privacy Policy</a>
+      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
+      <a href="https://medikah.health/terms" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Terms of Service</a>
+      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
+      <a href="mailto:hello@medikah.health" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Contact</a>
     </p>
   </div>
-</div>"""
+</div>
+</body>
+</html>"""
 
     # Doctor notification
     symptoms_line = (
