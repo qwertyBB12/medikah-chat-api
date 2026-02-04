@@ -326,42 +326,42 @@ async def _perform_scheduling(
         "The Medikah Care Team\n"
     )
     patient_html_body = f"""\
-<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #FAFAFB;">
-  <div style="padding: 40px 48px; background: #2C7A8C; border-radius: 12px 12px 0 0; text-align: center;">
-    <p style="font-size: 24px; font-weight: 800; color: #FFFFFF; letter-spacing: 0.02em; margin: 0 0 8px 0;">medikah</p>
-    <p style="color: rgba(255,255,255,0.85); font-size: 15px; margin: 0;">Your visit is confirmed.</p>
+<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #FAFAFB; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(27,42,65,0.08);">
+  <!-- Header with inst-blue background and white logo text -->
+  <div style="background: #1B2A41; padding: 44px 48px; text-align: center;">
+    <p style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 32px; font-weight: 800; color: #FFFFFF; letter-spacing: -0.01em; margin: 0;">medikah</p>
   </div>
 
-  <div style="padding: 48px; background: #FFFFFF; border: 1px solid rgba(209,213,219,0.3); border-top: none;">
+  <div style="padding: 48px; background: #FFFFFF;">
     <p style="font-size: 20px; font-weight: 600; line-height: 1.4; color: #1B2A41; margin: 0 0 24px 0;">Hi {req.patient_name},</p>
 
     <p style="font-size: 16px; line-height: 1.7; color: #4A5568; margin: 0 0 24px 0;">
       Great news — your Medikah visit is confirmed. Here are your appointment details:
     </p>
 
-    <div style="background: #F5F6F8; border-left: 3px solid #2C7A8C; padding: 20px; margin: 0 0 28px 0; border-radius: 0 8px 8px 0;">
+    <div style="background: linear-gradient(135deg, #F8FAFB 0%, #F0F4F5 100%); border-left: 4px solid #1B2A41; padding: 24px; margin: 0 0 28px 0; border-radius: 0 8px 8px 0;">
       <table style="width: 100%; border-collapse: collapse;">
         <tr>
-          <td style="padding: 8px 0; color: #8A8D91; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; width: 110px;">Doctor</td>
-          <td style="padding: 8px 0; color: #1C1C1E; font-size: 15px; font-weight: 600;">{assigned_doctor}</td>
+          <td style="padding: 10px 0; color: #6B7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; width: 110px; font-weight: 600;">Doctor</td>
+          <td style="padding: 10px 0; color: #1B2A41; font-size: 16px; font-weight: 700;">{assigned_doctor}</td>
         </tr>
         <tr>
-          <td style="padding: 8px 0; color: #8A8D91; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Date &amp; Time</td>
-          <td style="padding: 8px 0; color: #1C1C1E; font-size: 15px; font-weight: 600;">{time_display}</td>
+          <td style="padding: 10px 0; color: #6B7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">Date &amp; Time</td>
+          <td style="padding: 10px 0; color: #1B2A41; font-size: 16px; font-weight: 700;">{time_display}</td>
         </tr>
       </table>
     </div>
 
     <div style="text-align: center; margin: 0 0 28px 0;">
-      <a href="{doxy_link}" style="display: inline-block; background: #2C7A8C; color: #FFFFFF; text-decoration: none; padding: 16px 32px; border-radius: 10px; font-size: 15px; font-weight: 600; letter-spacing: 0.01em;">Join Your Visit</a>
+      <a href="{doxy_link}" style="display: inline-block; background: #1B2A41; color: #FFFFFF; text-decoration: none; padding: 18px 40px; border-radius: 8px; font-size: 16px; font-weight: 700; letter-spacing: 0.02em; box-shadow: 0 4px 12px rgba(27,42,65,0.25);">Join Your Visit</a>
     </div>
 
-    <p style="font-size: 13px; line-height: 1.6; color: #8A8D91; text-align: center; margin: 0 0 28px 0;">
-      We've attached a calendar invite &mdash; open it to add this appointment to your calendar automatically.
+    <p style="font-size: 13px; line-height: 1.6; color: #6B7280; text-align: center; margin: 0 0 28px 0;">
+      We've attached a calendar invite — open it to add this appointment to your calendar automatically.
     </p>
 
-    <div style="border-top: 1px solid rgba(27,42,65,0.1); padding-top: 24px; margin-top: 24px;">
-      <p style="font-size: 14px; font-weight: 600; color: #1B2A41; margin: 0 0 12px 0;">Before your visit:</p>
+    <div style="border-top: 2px solid #F0F4F5; padding-top: 24px; margin-top: 24px;">
+      <p style="font-size: 14px; font-weight: 700; color: #1B2A41; margin: 0 0 12px 0;">Before your visit:</p>
       <ul style="font-size: 14px; line-height: 1.8; color: #4A5568; padding-left: 20px; margin: 0;">
         <li>No downloads needed — just click the link when it's time</li>
         <li>Find a quiet, private spot with a good connection</li>
@@ -373,28 +373,29 @@ async def _perform_scheduling(
       Need to reschedule or have questions? Simply reply to this email — our care team is here for you.
     </p>
 
-    <div style="margin-top: 32px; padding-top: 24px; border-top: 1px solid rgba(27,42,65,0.1);">
-      <p style="font-size: 15px; color: #4A5568; line-height: 1.6; font-style: italic; margin: 0 0 8px 0;">
+    <div style="margin-top: 32px; padding-top: 24px; border-top: 2px solid #F0F4F5;">
+      <p style="font-size: 15px; color: #6B7280; line-height: 1.6; font-style: italic; margin: 0 0 8px 0;">
         Healthcare coordination that crosses borders.<br/>Care that never does.
       </p>
-      <p style="font-size: 16px; font-weight: 600; color: #1B2A41; margin: 0;">— Medikah Coordination Team</p>
+      <p style="font-size: 16px; font-weight: 700; color: #1B2A41; margin: 0;">— Medikah Care Team</p>
     </div>
   </div>
 
-  <div style="padding: 32px 48px; background: #F5F6F8; border-radius: 0 0 12px 12px; border: 1px solid rgba(209,213,219,0.3); border-top: none; text-align: center;">
-    <p style="font-size: 13px; line-height: 1.6; color: #8A8D91; margin: 0 0 16px 0;">
+  <!-- Footer with inst-blue -->
+  <div style="padding: 28px 48px; background: #1B2A41; text-align: center;">
+    <p style="font-size: 12px; line-height: 1.6; color: rgba(255,255,255,0.7); margin: 0 0 12px 0;">
       Your conversations are encrypted and handled with care.<br/>
       Licensed professionals may review when needed to ensure safe guidance.
     </p>
-    <p style="font-size: 13px; line-height: 1.6; color: #4A5568; margin: 0 0 16px 0;">
+    <p style="font-size: 12px; line-height: 1.6; color: rgba(255,255,255,0.5); margin: 0 0 16px 0;">
       Medikah Corporation · Incorporated in Delaware, USA
     </p>
-    <p style="font-size: 13px; margin: 0;">
+    <p style="font-size: 12px; margin: 0;">
       <a href="https://medikah.health/privacy" style="color: #2C7A8C; text-decoration: none;">Privacy Policy</a>
-      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
+      <span style="color: rgba(255,255,255,0.3); margin: 0 8px;">|</span>
       <a href="https://medikah.health/terms" style="color: #2C7A8C; text-decoration: none;">Terms of Service</a>
-      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="mailto:partnerships@medikah.health" style="color: #2C7A8C; text-decoration: none;">Contact</a>
+      <span style="color: rgba(255,255,255,0.3); margin: 0 8px;">|</span>
+      <a href="mailto:hello@medikah.health" style="color: #2C7A8C; text-decoration: none;">Contact</a>
     </p>
   </div>
 </div>"""
