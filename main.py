@@ -557,11 +557,20 @@ async def finalize_chat_scheduling(
         outcome.appointment_id,
     )
 
-    appointment_time = (
-        intake.preferred_time_utc.isoformat()
-        if intake.preferred_time_utc
-        else "your scheduled time"
-    )
+    # Format appointment time in patient's local timezone for display
+    from zoneinfo import ZoneInfo
+    if intake.preferred_time_utc:
+        patient_tz = ZoneInfo("UTC")
+        if intake.patient_timezone:
+            try:
+                patient_tz = ZoneInfo(intake.patient_timezone)
+            except (KeyError, ValueError):
+                pass
+        local_time = intake.preferred_time_utc.astimezone(patient_tz)
+        tz_abbr = local_time.strftime("%Z") or "UTC"
+        appointment_time = local_time.strftime(f"%B %d, %Y at %I:%M %p {tz_abbr}")
+    else:
+        appointment_time = "your scheduled time"
 
     if isinstance(outcome.response, SandboxScheduleResponse):
         message = (
