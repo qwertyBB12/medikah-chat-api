@@ -784,5 +784,7 @@ async def health() -> dict:
         "supabase": conversation_store._use_db,
         "sandbox_mode": EMAIL_SANDBOX_MODE,
         "ai_test": ai_test,
+        "doxy_room_url": DOXY_ROOM_URL or "(not set)",
+        "doxy_base_url": DOXY_BASE_URL or "(not set)",
     }
 
