@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import secrets
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from threading import Lock
@@ -22,6 +23,7 @@ class ConversationStage(str, Enum):
     """Lifecycle stages for the intake conversation."""
 
     WELCOME = "welcome"
+    CONFIRM_IDENTITY = "confirm_identity"
     COLLECT_NAME = "collect_name"
     COLLECT_EMAIL = "collect_email"
     COLLECT_SYMPTOMS = "collect_symptoms"
@@ -293,5 +295,5 @@ class ConversationStateStore:
         with self._lock:
             state = self._memory_store.get(session_id)
             if state:
-                return replace(state)
+                return copy.deepcopy(state)
             return None

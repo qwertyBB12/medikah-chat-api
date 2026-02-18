@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from services.appointments import SecureAppointmentStore
@@ -32,6 +31,11 @@ from utils.scheduling import (
     build_ics_content,
     generate_doxy_link,
 )
+from routes.physician_routes import router as physician_router
+from routes.ai_routes import router as ai_router
+from utils.openai_client import get_openai_client
+
+load_dotenv()
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Medikah Chat API")
@@ -55,11 +59,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_methods=["POST", "GET", "PUT", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
-load_dotenv()
+app.include_router(physician_router)
+app.include_router(ai_router)
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -67,12 +72,7 @@ logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(messa
 logging.info(f"Using LOG_LEVEL={log_level_str}")
 logger = logging.getLogger("medikah.api")
 
-try:
-    openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    logger.info("OpenAI client initialised successfully.")
-except KeyError:
-    openai_client = None
-    logger.warning("OPENAI_API_KEY not set; OpenAI client disabled.")
+openai_client = get_openai_client()
 
 
 class ChatRequest(BaseModel):
@@ -82,6 +82,8 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, max_length=120)
     locale: Optional[str] = Field(default=None, max_length=16)
     timezone: Optional[str] = Field(default=None, max_length=64)
+    patient_name: Optional[str] = Field(default=None, max_length=255)
+    patient_email: Optional[EmailStr] = None
 
 
 class ChatResponse(BaseModel):
@@ -651,7 +653,8 @@ async def chat_endpoint(request: Request, req: ChatRequest) -> ChatResponse:
 
     try:
         triage_result = await triage_engine.process_message(
-            req.session_id, message, locale=req.locale, timezone=req.timezone
+            req.session_id, message, locale=req.locale, timezone=req.timezone,
+            patient_name=req.patient_name, patient_email=req.patient_email,
         )
     except Exception as exc:  # noqa: BLE001 - want a clean HTTP error for clients
         logger.exception("Triage engine failed for session %s", req.session_id)
