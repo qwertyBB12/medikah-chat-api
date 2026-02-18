@@ -226,6 +226,11 @@ class TriageConversationEngine:
                 "Welcome to Medikah! I'm here to help you connect with a doctor. "
                 "What brings you in today? How are you feeling?"
             )
+        elif stage == ConversationStage.CONFIRM_IDENTITY:
+            return (
+                f"Hi {intake.patient_name} ({intake.patient_email}), "
+                "is this correct?"
+            )
         elif stage == ConversationStage.COLLECT_SYMPTOMS:
             return (
                 "Thank you for sharing that. Could you tell me a bit more about "
@@ -278,12 +283,20 @@ class TriageConversationEngine:
     # ------------------------------------------------------------------
 
     async def process_message(
-        self, session_id: Optional[str], message: str, *, locale: Optional[str] = None, timezone: Optional[str] = None
+        self, session_id: Optional[str], message: str, *, locale: Optional[str] = None, timezone: Optional[str] = None,
+        patient_name: Optional[str] = None, patient_email: Optional[str] = None,
     ) -> TriageResult:
         state = self.begin_or_resume(session_id)
         intake = state.intake
         text = message.strip()
         should_schedule = False
+
+        # Pre-populate identity from auth if this is a new session at WELCOME stage
+        if state.stage == ConversationStage.WELCOME and patient_name and patient_email:
+            if not intake.patient_name and not intake.patient_email:
+                intake.patient_name = _sanitize_name(patient_name)
+                intake.patient_email = patient_email
+                intake.notes.append(f"identity_from_auth: {patient_name} <{patient_email}>")
 
         if not text:
             return TriageResult(
@@ -347,7 +360,19 @@ class TriageConversationEngine:
         #       → COLLECT_EMAIL → COLLECT_TIMING → CONFIRM → SCHEDULE
 
         if state.stage == ConversationStage.WELCOME:
-            state.stage = ConversationStage.COLLECT_SYMPTOMS
+            if intake.patient_name and intake.patient_email:
+                state.stage = ConversationStage.CONFIRM_IDENTITY
+            else:
+                state.stage = ConversationStage.COLLECT_SYMPTOMS
+
+        elif state.stage == ConversationStage.CONFIRM_IDENTITY:
+            if _has_word(text, AFFIRMATIVE_WORDS):
+                state.stage = ConversationStage.COLLECT_SYMPTOMS
+            elif _has_word(text, NEGATIVE_WORDS):
+                intake.patient_name = None
+                intake.patient_email = None
+                state.stage = ConversationStage.COLLECT_SYMPTOMS
+            # Otherwise stay at CONFIRM_IDENTITY — AI will re-ask
 
         elif state.stage == ConversationStage.COLLECT_SYMPTOMS:
             intake.symptom_overview = text
