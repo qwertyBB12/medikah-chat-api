@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
     symptom_history TEXT,
     preferred_time_utc TIMESTAMPTZ,
     locale_preference TEXT,
+    patient_timezone TEXT,
     emergency_flag BOOLEAN NOT NULL DEFAULT FALSE,
     appointment_id TEXT,
     appointment_confirmed_at TIMESTAMPTZ,
