@@ -12,7 +12,7 @@ from enum import Enum
 from threading import Lock
 from typing import Dict, List, Optional
 
-from db.client import get_supabase
+from db.client import get_supabase, is_production
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,9 @@ class ConversationState:
 class ConversationStateStore:
     """
     Conversation state store with Supabase persistence.
-    Falls back to in-memory storage if Supabase is not configured.
+
+    Falls back to in-memory storage in development only.  In production,
+    raises ``RuntimeError`` if Supabase is unavailable.
     """
 
     def __init__(self, ttl_minutes: int = SESSION_TTL_MINUTES) -> None:
@@ -111,6 +113,11 @@ class ConversationStateStore:
         if self._supabase:
             logger.info("ConversationStateStore using Supabase persistence.")
         else:
+            if is_production():
+                raise RuntimeError(
+                    "ConversationStateStore requires Supabase in production. "
+                    "In-memory fallback is disabled to prevent silent data loss."
+                )
             logger.info("ConversationStateStore using in-memory storage.")
 
     @property
@@ -238,8 +245,12 @@ class ConversationStateStore:
                 self._supabase.table("conversation_sessions").upsert(
                     self._state_to_row(state)
                 ).execute()
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to create session in Supabase")
+                if is_production():
+                    raise RuntimeError(
+                        "Failed to persist new session to Supabase"
+                    ) from exc
         else:
             with self._lock:
                 self._prune()
@@ -262,8 +273,12 @@ class ConversationStateStore:
                 self._supabase.table("conversation_sessions").upsert(
                     self._state_to_row(state)
                 ).execute()
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to update session in Supabase")
+                if is_production():
+                    raise RuntimeError(
+                        "Failed to update session in Supabase"
+                    ) from exc
         else:
             with self._lock:
                 self._memory_store[state.session_id] = state
@@ -277,8 +292,12 @@ class ConversationStateStore:
                     "stage": ConversationStage.COMPLETED.value,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }).eq("session_id", session_id).execute()
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to mark session completed in Supabase")
+                if is_production():
+                    raise RuntimeError(
+                        "Failed to mark session completed in Supabase"
+                    ) from exc
             return
 
         with self._lock:
