@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from utils.auth import verify_physician_access
+from utils.auth import AuthenticatedPhysician, authenticated_physician
 
 from models.physician import (
     InquiryAction,
@@ -60,14 +60,17 @@ def _get_physician_name(physician_id: str) -> str:
 
 @router.get("/{physician_id}/dashboard", response_model=PhysicianProfile)
 @limiter.limit("30/minute")
-async def physician_dashboard(request: Request, physician_id: str = Depends(verify_physician_access)) -> PhysicianProfile:
+async def physician_dashboard(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> PhysicianProfile:
     """Return physician profile, verification status, and dashboard stats."""
     try:
-        profile = get_physician_profile(physician_id)
+        profile = get_physician_profile(auth.physician_id)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Database not configured")
     except Exception:
-        logger.exception("Error fetching dashboard for physician %s", physician_id)
+        logger.exception("Error fetching dashboard for physician %s", auth.physician_id)
         raise HTTPException(status_code=500, detail="Unable to load dashboard data.")
 
     if profile is None:
@@ -80,7 +83,7 @@ async def physician_dashboard(request: Request, physician_id: str = Depends(veri
 @limiter.limit("30/minute")
 async def list_inquiries(
     request: Request,
-    physician_id: str = Depends(verify_physician_access),
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     status: Optional[str] = Query(default=None),
@@ -94,7 +97,7 @@ async def list_inquiries(
 
     try:
         result = get_physician_inquiries(
-            physician_id,
+            auth.physician_id,
             page=page,
             page_size=page_size,
             status_filter=status,
@@ -102,7 +105,7 @@ async def list_inquiries(
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Database not configured")
     except Exception:
-        logger.exception("Error fetching inquiries for physician %s", physician_id)
+        logger.exception("Error fetching inquiries for physician %s", auth.physician_id)
         raise HTTPException(status_code=500, detail="Unable to load inquiries.")
 
     return result
@@ -112,17 +115,17 @@ async def list_inquiries(
 @limiter.limit("10/minute")
 async def accept_patient_inquiry(
     request: Request,
-    physician_id: str = Depends(verify_physician_access),
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
     inquiry_id: str = Path(...),
 ) -> PatientInquiry:
     """Accept a patient inquiry and trigger patient notification."""
     try:
-        inquiry = accept_inquiry(physician_id, inquiry_id)
+        inquiry = accept_inquiry(auth.physician_id, inquiry_id)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Database not configured")
     except Exception:
         logger.exception(
-            "Error accepting inquiry %s for physician %s", inquiry_id, physician_id
+            "Error accepting inquiry %s for physician %s", inquiry_id, auth.physician_id
         )
         raise HTTPException(status_code=500, detail="Unable to process inquiry.")
 
@@ -131,7 +134,7 @@ async def accept_patient_inquiry(
 
     if _notification_service and inquiry.patient_email:
         try:
-            physician_name = _get_physician_name(physician_id)
+            physician_name = _get_physician_name(auth.physician_id)
             await send_inquiry_accepted_email(
                 patient_email=inquiry.patient_email,
                 patient_name=inquiry.patient_name,
@@ -150,17 +153,17 @@ async def accept_patient_inquiry(
 async def decline_patient_inquiry(
     request: Request,
     body: InquiryAction,
-    physician_id: str = Depends(verify_physician_access),
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
     inquiry_id: str = Path(...),
 ) -> PatientInquiry:
     """Decline a patient inquiry with an optional reason."""
     try:
-        inquiry = decline_inquiry(physician_id, inquiry_id, reason=body.reason)
+        inquiry = decline_inquiry(auth.physician_id, inquiry_id, reason=body.reason)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Database not configured")
     except Exception:
         logger.exception(
-            "Error declining inquiry %s for physician %s", inquiry_id, physician_id
+            "Error declining inquiry %s for physician %s", inquiry_id, auth.physician_id
         )
         raise HTTPException(status_code=500, detail="Unable to process inquiry.")
 
@@ -169,7 +172,7 @@ async def decline_patient_inquiry(
 
     if _notification_service and inquiry.patient_email:
         try:
-            physician_name = _get_physician_name(physician_id)
+            physician_name = _get_physician_name(auth.physician_id)
             await send_inquiry_declined_email(
                 patient_email=inquiry.patient_email,
                 patient_name=inquiry.patient_name,
@@ -188,15 +191,15 @@ async def decline_patient_inquiry(
 @limiter.limit("30/minute")
 async def get_availability(
     request: Request,
-    physician_id: str = Depends(verify_physician_access),
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
 ) -> PhysicianAvailability:
     """Get the physician's current availability schedule."""
     try:
-        availability = get_physician_availability(physician_id)
+        availability = get_physician_availability(auth.physician_id)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Database not configured")
     except Exception:
-        logger.exception("Error fetching availability for physician %s", physician_id)
+        logger.exception("Error fetching availability for physician %s", auth.physician_id)
         raise HTTPException(status_code=500, detail="Unable to load availability.")
 
     if availability is None:
@@ -210,15 +213,15 @@ async def get_availability(
 async def set_availability(
     request: Request,
     body: PhysicianAvailability,
-    physician_id: str = Depends(verify_physician_access),
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
 ) -> PhysicianAvailability:
     """Update the physician's availability schedule."""
     try:
-        result = update_physician_availability(physician_id, body)
+        result = update_physician_availability(auth.physician_id, body)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Database not configured")
     except Exception:
-        logger.exception("Error updating availability for physician %s", physician_id)
+        logger.exception("Error updating availability for physician %s", auth.physician_id)
         raise HTTPException(status_code=500, detail="Unable to update availability.")
 
     return result

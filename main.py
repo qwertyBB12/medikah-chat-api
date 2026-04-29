@@ -34,8 +34,23 @@ from utils.scheduling import (
 from routes.physician_routes import router as physician_router
 from routes.ai_routes import router as ai_router
 from utils.openai_client import get_openai_client
+from db.client import is_production
 
 load_dotenv()
+
+# NEXTAUTH_SECRET — shared HS256 signing key with the Next.js NextAuth config.
+# Required in production so utils/auth.py can verify physician JWTs against
+# the same secret the frontend uses to issue them. In development, a missing
+# secret only logs a warning so local-only flows that don't hit auth-gated
+# routes can still run.
+NEXTAUTH_SECRET = os.getenv("NEXTAUTH_SECRET")
+if NEXTAUTH_SECRET is None:
+    if is_production():
+        raise RuntimeError(
+            "NEXTAUTH_SECRET is required in production. "
+            "Set it in the Render dashboard. Same value as the frontend NextAuth signing secret."
+        )
+    logging.warning("NEXTAUTH_SECRET not set; auth dependency will reject all requests.")
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Medikah Chat API")
