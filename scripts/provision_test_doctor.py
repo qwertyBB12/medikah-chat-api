@@ -1,29 +1,43 @@
 """End-to-end Práctikah workspace provisioning dry-run.
 
-Usage:
+Usage (Pro tier — default):
     python -m scripts.provision_test_doctor \\
         --physician-id <uuid> \\
         --domain drsmith-test.com \\
         --tld-strategy mocked \\
         --rollback-on-success true
 
+Usage (Free tier — Phase 12-02):
+    python -m scripts.provision_test_doctor \\
+        --physician-id <uuid> \\
+        --tier free \\
+        --title Dr \\
+        --mailbox-local-part sandbox-dr-test
+
 Flags:
     --physician-id <uuid>          (required) UUID of a verified physician in Supabase
-    --domain <fqdn>                (required) Test domain (orchestrator prefixes with
-                                   'sandbox-' in sandbox mode per D-19)
+    --domain <fqdn>                (required for --tier=pro) Test domain. For --tier=free,
+                                   always 'medikah.health' — do not pass --domain.
+    --tier {free,pro}              (default: pro) Workspace tier. 'free' exercises the
+                                   Phase 12-02 free-tier single-step Mailcow saga.
+                                   'pro' exercises the full 8-step registrar/CF/Mailcow saga.
+    --title {Dr,Dra}               (default: Dr) Physician honorific. Only used with --tier=free.
     --tld-strategy {real,mocked}   (default: mocked) 'mocked' skips registrar API;
                                    'real' burns ~$10 and requires CF Registrar beta
-                                   access + Phase 10 D-17 carry-items resolved
+                                   access + Phase 10 D-17 carry-items resolved.
+                                   Ignored for --tier=free (free-tier never uses registrar).
     --rollback-on-success {true,false}
                                    (default: false) If 'true', invokes run_rollback
                                    after a successful provisioning run — verifies
-                                   both forward and rollback paths in one CLI call
+                                   both forward and rollback paths in one CLI call.
+                                   Note: free-tier rollback only undoes the Mailcow mailbox.
     --resume                       If orphan runs are detected for this physician,
                                    resume rollback rather than exiting 4
-    --mailbox-local-part <str>     (default: dr-test) Mailbox local part
-    --registrant-name <str>        (default: Dr Práctikah Test)
-    --registrant-email <str>       (default: test@medikah.health)
-    --registrant-country <str>     (default: MX)
+    --mailbox-local-part <str>     (default: dr-test; sandbox prefix auto-added when
+                                   MEDIKAH_PROVISIONING_SANDBOX=true)
+    --registrant-name <str>        (default: Dr Práctikah Test) Pro tier only
+    --registrant-email <str>       (default: test@medikah.health) Pro tier only
+    --registrant-country <str>     (default: MX) Pro tier only
 
 Sandbox safety:
     This script ALWAYS forces MEDIKAH_PROVISIONING_SANDBOX=true regardless of the
@@ -33,11 +47,12 @@ Sandbox safety:
     can be swept without touching production data (Phase 11 D-19).
 
     To run a real-strategy staging dry-run that exercises the full registrar flow,
-    you must ALSO complete the Phase 10 D-17 carry-items:
+    you must ALSO complete the Phase 10 D-17 carry-items (D-23):
       1. MAILCOW_API_KEY rotation (currently 401 — see STATE.md pending todos)
       2. mcdkim DKIM key generation in Mailcow + DNS publish
       3. Mailcow admin 2FA re-enable (disabled during 2026-04-26 recovery)
-    Without these, '--tld-strategy real' will fail loudly at the Mailcow step.
+    Without (1), '--tier=free' will fail at the Mailcow mailbox creation step.
+    Without (1), '--tier=pro --tld-strategy real' will also fail loudly.
 
 Exit codes:
     0  — provisioning succeeded; if --rollback-on-success true, rollback also succeeded
@@ -85,7 +100,7 @@ DEFAULT_REGISTRANT_COUNTRY = "MX"
 def parse_args() -> argparse.Namespace:
     """Parse CLI flags."""
     p = argparse.ArgumentParser(
-        description="End-to-end Práctikah provisioning dry-run (Phase 11).",
+        description="End-to-end Práctikah provisioning dry-run (Phase 11/12).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -95,9 +110,28 @@ def parse_args() -> argparse.Namespace:
         help="UUID of a verified physician in Supabase",
     )
     p.add_argument(
+        "--tier",
+        choices=["free", "pro"],
+        default="pro",
+        help=(
+            "'pro' (default) exercises the full 8-step registrar/CF/Mailcow saga. "
+            "'free' exercises the Phase 12-02 single-step Mailcow saga "
+            "(no registrar/CF — adds mailbox to medikah.health only)."
+        ),
+    )
+    p.add_argument(
+        "--title",
+        choices=["Dr", "Dra"],
+        default="Dr",
+        help="Physician honorific for free-tier provisioning (default: Dr)",
+    )
+    p.add_argument(
         "--domain",
-        required=True,
-        help="Test domain to provision (orchestrator prefixes with 'sandbox-' in sandbox mode)",
+        default=None,
+        help=(
+            "Test domain for --tier=pro. "
+            "For --tier=free this is always 'medikah.health' — do not pass --domain."
+        ),
     )
     p.add_argument(
         "--tld-strategy",
@@ -106,7 +140,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "'mocked' (default) skips registrar API; "
             "'real' burns ~$10 — requires CF Registrar beta access "
-            "(Phase 10 D-17 carry-items required)"
+            "(Phase 10 D-17 carry-items required). Ignored for --tier=free."
         ),
     )
     p.add_argument(
@@ -129,22 +163,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--mailbox-local-part",
         default=DEFAULT_LOCAL_PART,
-        help=f"Mailbox local part (default: {DEFAULT_LOCAL_PART})",
+        help=(
+            f"Mailbox local part (default: {DEFAULT_LOCAL_PART}). "
+            "When MEDIKAH_PROVISIONING_SANDBOX=true, 'sandbox-' prefix is auto-added."
+        ),
     )
     p.add_argument(
         "--registrant-name",
         default=DEFAULT_REGISTRANT_NAME,
-        help=f"WHOIS registrant name (default: {DEFAULT_REGISTRANT_NAME})",
+        help=f"WHOIS registrant name — pro tier only (default: {DEFAULT_REGISTRANT_NAME})",
     )
     p.add_argument(
         "--registrant-email",
         default=DEFAULT_REGISTRANT_EMAIL,
-        help=f"WHOIS registrant email (default: {DEFAULT_REGISTRANT_EMAIL})",
+        help=f"WHOIS registrant email — pro tier only (default: {DEFAULT_REGISTRANT_EMAIL})",
     )
     p.add_argument(
         "--registrant-country",
         default=DEFAULT_REGISTRANT_COUNTRY,
-        help=f"ISO 3166-1 alpha-2 country code (default: {DEFAULT_REGISTRANT_COUNTRY})",
+        help=f"ISO 3166-1 alpha-2 country code — pro tier only (default: {DEFAULT_REGISTRANT_COUNTRY})",
     )
     return p.parse_args()
 
@@ -180,7 +217,39 @@ async def main_async(args: argparse.Namespace) -> int:
     from services.practikah.audit import ProvisioningLogWriter  # noqa: PLC0415
 
     physician_id = args.physician_id
-    domain = args.domain
+    tier = args.tier  # 'free' | 'pro'
+
+    # -----------------------------------------------------------------------
+    # Tier-specific setup
+    # -----------------------------------------------------------------------
+    if tier == "free":
+        # Free tier always uses medikah.health; --domain is not applicable
+        domain = "medikah.health"
+        # Sandbox mode: auto-prefix the local part with 'sandbox-' to keep
+        # test mailboxes clearly scoped (D-19)
+        mailbox_local_part = args.mailbox_local_part
+        if not mailbox_local_part.startswith("sandbox-"):
+            mailbox_local_part = f"sandbox-{mailbox_local_part}"
+        tld_strategy = "mocked"  # free-tier never touches registrar
+        print(
+            f"[provision_test_doctor] tier=free domain={domain} "
+            f"mailbox_local_part={mailbox_local_part} title={args.title}"
+        )
+    else:
+        # Pro tier: --domain is required
+        if not args.domain:
+            print(
+                "[provision_test_doctor] ERROR: --domain is required for --tier=pro",
+                file=sys.stderr,
+            )
+            return 99
+        domain = args.domain
+        mailbox_local_part = args.mailbox_local_part
+        tld_strategy = args.tld_strategy
+        print(
+            f"[provision_test_doctor] tier=pro domain={domain} "
+            f"strategy={tld_strategy}"
+        )
 
     # -----------------------------------------------------------------------
     # Orphan-run check (D-09: crash-resume)
@@ -220,30 +289,42 @@ async def main_async(args: argparse.Namespace) -> int:
         print("[provision_test_doctor] no orphans")
 
     # -----------------------------------------------------------------------
-    # Generate mailbox password — NEVER printed (T-11-07-03)
+    # Generate mailbox password — NEVER printed (T-11-07-03 / T-12-02-02)
     # -----------------------------------------------------------------------
     mailbox_password = token_urlsafe(24)
 
     # -----------------------------------------------------------------------
     # Run provisioning saga
     # -----------------------------------------------------------------------
-    tld_strategy = args.tld_strategy
     print(
-        f"[provision_test_doctor] starting provisioning domain={domain} "
-        f"strategy={tld_strategy}"
+        f"[provision_test_doctor] starting provisioning tier={tier} domain={domain}"
     )
 
     started = time.monotonic()
-    result = await provision_workspace(
-        physician_id=physician_id,
-        domain=domain,
-        mailbox_local_part=args.mailbox_local_part,
-        mailbox_password=mailbox_password,
-        registrant_name=args.registrant_name,
-        registrant_email=args.registrant_email,
-        registrant_country=args.registrant_country,
-        tld_strategy=tld_strategy,  # type: ignore[arg-type]
-    )
+
+    if tier == "free":
+        result = await provision_workspace(
+            physician_id=physician_id,
+            domain=domain,
+            mailbox_local_part=mailbox_local_part,
+            mailbox_password=mailbox_password,
+            tier="free",
+            title=args.title,
+            tld_strategy="mocked",
+        )
+    else:
+        result = await provision_workspace(
+            physician_id=physician_id,
+            domain=domain,
+            mailbox_local_part=mailbox_local_part,
+            mailbox_password=mailbox_password,
+            registrant_name=args.registrant_name,
+            registrant_email=args.registrant_email,
+            registrant_country=args.registrant_country,
+            tld_strategy=tld_strategy,  # type: ignore[arg-type]
+            tier="pro",
+        )
+
     elapsed = time.monotonic() - started
 
     # -----------------------------------------------------------------------
