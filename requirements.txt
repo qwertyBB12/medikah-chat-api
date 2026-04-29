@@ -9,3 +9,6 @@ email-validator
 python-dateutil
 slowapi
 supabase
+httpx
+tenacity
+pyjwt[crypto]
