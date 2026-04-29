@@ -33,6 +33,7 @@ from utils.scheduling import (
 )
 from routes.physician_routes import router as physician_router
 from routes.ai_routes import router as ai_router
+from routes.practikah_routes import router as practikah_router
 from utils.openai_client import get_openai_client
 from db.client import is_production
 
@@ -80,6 +81,24 @@ app.add_middleware(
 
 app.include_router(physician_router)
 app.include_router(ai_router)
+app.include_router(practikah_router)
+
+
+@app.on_event("startup")
+async def _resume_orphan_provisioning_runs():
+    """On startup: detect abandoned provisioning runs and roll them back.
+
+    Per Phase 11 D-09: the log is the source of truth. If the FastAPI process
+    died mid-provision, the log preserves what completed; this hook resumes rollback.
+    Failure is non-fatal — logged and swallowed so FastAPI continues starting up.
+    """
+    from services.practikah.orchestrator import resume_orphan_runs
+    try:
+        cleaned = await resume_orphan_runs()
+        if cleaned:
+            logger.info("[practikah] resumed %d orphan provisioning runs on startup", cleaned)
+    except Exception:
+        logger.exception("[practikah] resume_orphan_runs failed; continuing")
 
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
