@@ -308,6 +308,213 @@ async def _fetch_resend_dkim(domain: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Free-tier provisioning saga (Phase 12-02)
+# ---------------------------------------------------------------------------
+
+async def _provision_free_workspace(
+    physician_id: str,
+    mailbox_local_part: str,
+    mailbox_password: str,
+    run_id: str,
+    title: Optional[str] = None,
+) -> ProvisioningResult:
+    """Single-step free-tier provisioning saga.
+
+    The medikah.health Mailcow domain is pre-provisioned (Phase 10). This function
+    only adds the physician's mailbox to that existing domain.
+
+    Saga step:
+      1. mailcow.add_mailbox(domain='medikah.health', local_part, password, quota_mb=10240)
+
+    UNDO: undo_add_mailbox on failure (UNDO_REGISTRY already covers this step).
+
+    State machine transitions (physician_workspace_accounts.state):
+      The CALLER (wizard_complete route) is responsible for:
+        - Setting state='provisioning' BEFORE calling this function.
+        - Setting state='free_active' + mailbox fields on success.
+        - Setting state='free_failed' on failure.
+      This function updates the DB directly AS WELL for defense-in-depth — the
+      route-level update is the primary path; this is a fallback for orphan-run
+      crash recovery.
+
+    Per T-12-02-02: mailbox_password is NEVER logged.
+    """
+    started_at = time.monotonic()
+    log = ProvisioningLogWriter(physician_id, run_id)
+    domain = "medikah.health"
+    mailbox_address = f"{mailbox_local_part}@{domain}"
+
+    logger.info(
+        "[orchestrator] _provision_free_workspace start physician_id=%s "
+        "mailbox=%s run_id=%s sandbox=%s",
+        physician_id, mailbox_address, run_id, _SANDBOX_MODE,
+    )
+
+    await log.requested(
+        step="free_tier.start",
+        detail={"physician_id": physician_id, "tier": "free"},
+        resource_type="workspace",
+    )
+
+    try:
+        mailbox_prov = get_mailbox_provisioner()
+    except RuntimeError as err:
+        elapsed = time.monotonic() - started_at
+        await log.failed(
+            step="free_tier.start",
+            detail={"error": str(err)},
+            resource_type="workspace",
+        )
+        return ProvisioningResult(
+            success=False,
+            run_id=run_id,
+            elapsed_seconds=elapsed,
+            domain=domain,
+            mailbox_address=None,
+            error=f"Mailbox provisioner misconfigured: {err}",
+        )
+
+    # Step 1: add_mailbox — the only saga step for free tier
+    # NOTE: password never in log (T-12-02-02 / T-12-02-11)
+    await log.requested(
+        step="mailcow.add_mailbox",
+        detail={"local_part": mailbox_local_part, "domain": domain},
+        resource_type="mailbox",
+    )
+
+    try:
+        mailbox_result = await mailbox_prov.do_add_mailbox(
+            local_part=mailbox_local_part,
+            domain=domain,
+            password=mailbox_password,
+            run_id=run_id,
+            quota_mb=10240,  # MAIL-08: 10 GB default
+        )
+    except Exception as err:
+        elapsed = time.monotonic() - started_at
+        await log.failed(
+            step="mailcow.add_mailbox",
+            detail={"local_part": mailbox_local_part, "domain": domain, "error": str(err)},
+            resource_type="mailbox",
+        )
+        logger.exception(
+            "[orchestrator] _provision_free_workspace mailcow.add_mailbox exception "
+            "physician_id=%s run_id=%s",
+            physician_id, run_id,
+        )
+        return ProvisioningResult(
+            success=False,
+            run_id=run_id,
+            elapsed_seconds=elapsed,
+            domain=domain,
+            mailbox_address=None,
+            error=f"Mailbox creation failed: {err}",
+        )
+
+    if not mailbox_result.success:
+        elapsed = time.monotonic() - started_at
+        await log.failed(
+            step="mailcow.add_mailbox",
+            detail={
+                "local_part": mailbox_local_part,
+                "domain": domain,
+                "error": mailbox_result.error,
+            },
+            resource_type="mailbox",
+        )
+        # Attempt undo (best-effort) — mailbox may have been partially created
+        try:
+            await mailbox_prov.undo_add_mailbox(
+                local_part=mailbox_local_part,
+                domain=domain,
+                run_id=run_id,
+                prior_result=mailbox_result,
+            )
+        except Exception:
+            logger.warning(
+                "[orchestrator] _provision_free_workspace: undo_add_mailbox failed "
+                "physician_id=%s run_id=%s (best-effort, continuing)",
+                physician_id, run_id,
+            )
+        error_msg = mailbox_result.error or "Mailcow add_mailbox returned failure"
+        logger.warning(
+            "[orchestrator] _provision_free_workspace FAILED physician_id=%s "
+            "run_id=%s error=%s elapsed=%.1fs",
+            physician_id, run_id, error_msg, elapsed,
+        )
+        return ProvisioningResult(
+            success=False,
+            run_id=run_id,
+            elapsed_seconds=elapsed,
+            domain=domain,
+            mailbox_address=None,
+            error=error_msg,
+        )
+
+    # Mailbox created successfully
+    await log.succeeded(
+        step="mailcow.add_mailbox",
+        detail={
+            "mailbox_address": mailbox_address,
+            "resource_id": mailbox_result.resource_id,
+        },
+        resource_type="mailbox",
+    )
+
+    # Write workspace_audit_log (OPS-01 / T-12-02-05)
+    from db.client import get_supabase
+    db = get_supabase()
+    if db is not None:
+        try:
+            db.table("workspace_audit_log").insert(
+                {
+                    "physician_id": physician_id,
+                    "actor_id": physician_id,
+                    "actor_role": "physician",
+                    "action": "workspace.setup_completed",
+                    "resource_type": "workspace",
+                    "resource_id": None,
+                    "detail": {
+                        "mailbox_address": mailbox_address,
+                        "tier": "free",
+                        "run_id": run_id,
+                    },
+                }
+            ).execute()
+        except Exception:
+            logger.exception(
+                "[orchestrator] _provision_free_workspace: workspace_audit_log insert "
+                "failed physician_id=%s run_id=%s (non-fatal)",
+                physician_id, run_id,
+            )
+
+    elapsed = time.monotonic() - started_at
+    await log.succeeded(
+        step="free_tier.completed",
+        detail={
+            "mailbox_address": mailbox_address,
+            "tier": "free",
+            "title": title,
+        },
+        resource_type="workspace",
+    )
+
+    logger.info(
+        "[orchestrator] _provision_free_workspace SUCCESS physician_id=%s "
+        "mailbox=%s run_id=%s elapsed=%.1fs",
+        physician_id, mailbox_address, run_id, elapsed,
+    )
+
+    return ProvisioningResult(
+        success=True,
+        run_id=run_id,
+        elapsed_seconds=elapsed,
+        domain=domain,
+        mailbox_address=mailbox_address,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main saga: provision_workspace
 # ---------------------------------------------------------------------------
 
@@ -322,10 +529,16 @@ async def provision_workspace(
     registrant_country: str = "US",
     run_id: Optional[str] = None,
     tld_strategy: Literal["real", "mocked"] = "real",
+    tier: Literal["free", "pro"] = "pro",
+    title: Optional[str] = None,
 ) -> ProvisioningResult:
-    """Run the full Práctikah workspace provisioning saga.
+    """Run the Práctikah workspace provisioning saga.
 
-    Saga steps (in order):
+    For tier='free': runs a single-step saga (Mailcow add_mailbox only) against
+    the existing medikah.health domain. Skips registrar, Cloudflare zone/DNS, and
+    custom hostname steps — these only apply for Pro (custom domain) workspaces.
+
+    For tier='pro' (default): runs the full 8-step saga:
     1.  registrar.register         — register the custom domain
     2.  mailcow.get_dkim           — fetch/create Mailcow DKIM key for DNS template
     3.  cloudflare.create_zone     — create CF DNS zone for the domain
@@ -350,16 +563,37 @@ async def provision_workspace(
 
     Args:
         physician_id:       UUID of the physician record.
-        domain:             The Pro physician's custom domain (e.g. 'drsmith.health').
+        domain:             For free tier: 'medikah.health'. For pro: custom domain (e.g. 'drsmith.health').
         mailbox_local_part: The mailbox local part (e.g. 'dr.smith').
         mailbox_password:   Mailbox password — NEVER logged.
-        registrant_name:    Doctor's full name for WHOIS.
-        registrant_email:   Doctor's email for WHOIS.
-        registrant_country: ISO 3166-1 alpha-2 country code.
+        registrant_name:    Doctor's full name for WHOIS (pro tier only).
+        registrant_email:   Doctor's email for WHOIS (pro tier only).
+        registrant_country: ISO 3166-1 alpha-2 country code (pro tier only).
         run_id:             Optional saga run ID (generated if not provided).
         tld_strategy:       'real' (real registrar) or 'mocked' (skip ~$10/run cost).
+        tier:               'free' (skip registrar/CF) or 'pro' (full saga). Default 'pro'.
+        title:              Physician honorific ('Dr' or 'Dra') — stored on free-tier completion.
     """
     run_id = run_id or str(uuid4())
+
+    # ------------------------------------------------------------------
+    # FREE-TIER BRANCH (Phase 12-02)
+    # Skips registrar, Cloudflare zone/DNS/custom-hostname.
+    # The medikah.health Mailcow domain is pre-provisioned (Phase 10).
+    # Only adds the physician's mailbox to the existing medikah.health domain.
+    # ------------------------------------------------------------------
+    if tier == "free":
+        return await _provision_free_workspace(
+            physician_id=physician_id,
+            mailbox_local_part=mailbox_local_part,
+            mailbox_password=mailbox_password,
+            run_id=run_id,
+            title=title,
+        )
+
+    # ------------------------------------------------------------------
+    # PRO-TIER SAGA (original Phase 11 full saga — unchanged)
+    # ------------------------------------------------------------------
     started_at = time.monotonic()
     log = ProvisioningLogWriter(physician_id, run_id)
 
