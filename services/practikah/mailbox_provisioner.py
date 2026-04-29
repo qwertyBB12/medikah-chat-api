@@ -757,3 +757,139 @@ class MailboxProvisioner:
             raw_response=fetched or {},
             error="DKIM key created but not retrievable — Mailcow may need a moment to propagate",
         )
+
+
+# ---------------------------------------------------------------------------
+# Module-level mailbox helpers for Phase 12-03 (password rotation + mobileconfig)
+# ---------------------------------------------------------------------------
+
+def _get_mailcow_api_settings() -> tuple[str, str]:
+    """Return (api_url, api_key) from environment variables.
+
+    Used by module-level helpers that are called from FastAPI routes directly
+    (not via MailboxProvisioner instance) — avoids re-reading env at import time.
+
+    Raises:
+        RuntimeError: if required env vars are not set.
+    """
+    import os
+    api_url = os.environ.get("MAILCOW_API_URL", "")
+    api_key = os.environ.get("MAILCOW_API_KEY", "")
+    if not api_url:
+        raise RuntimeError("MAILCOW_API_URL is not configured")
+    if not api_key:
+        raise RuntimeError("MAILCOW_API_KEY is not configured")
+    return api_url, api_key
+
+
+async def do_update_mailbox_password(
+    domain: str, local_part: str, new_password: str
+) -> None:
+    """Rotate mailbox password via Mailcow Admin API.
+
+    Mailcow endpoint: POST /api/v1/edit/mailbox
+    Body: {"items": ["<full_address>"], "attr": {"password": "<new>", "password2": "<new>"}}
+
+    Security: new_password is NEVER logged (T-12-03-01). The authenticated
+    FastAPI session (verified_physician) is the proof-of-identity gate (T-12-03-03
+    lean choice — doctor may legitimately have forgotten old password; all password
+    rotation events are audit-logged with action='workspace.password_changed' for
+    detectability).
+
+    Args:
+        domain: The domain name (e.g. 'medikah.health').
+        local_part: The mailbox local part (e.g. 'dr-lopez').
+        new_password: The new mailbox password. NEVER logged anywhere.
+
+    Raises:
+        ValueError: if new_password is shorter than 12 characters.
+        RuntimeError: if Mailcow returns a non-success envelope.
+        httpx.HTTPStatusError: on HTTP 4xx/5xx.
+        httpx.TransportError: on network failure.
+    """
+    if len(new_password) < 12:
+        raise ValueError("mailbox password must be >= 12 characters")
+
+    full_address = f"{local_part}@{domain}"
+    # Intentionally omit new_password from log — T-12-03-01
+    logger.info(
+        "[mailcow] do_update_mailbox_password address=%s", full_address
+    )
+
+    api_url, api_key = _get_mailcow_api_settings()
+    headers = {
+        "X-API-Key": api_key,
+        "Content-Type": "application/json",
+    }
+    timeout = httpx.Timeout(10.0, connect=3.0)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            f"{api_url.rstrip('/')}/api/v1/edit/mailbox",
+            json={
+                "items": [full_address],
+                "attr": {"password": new_password, "password2": new_password},
+            },
+            headers=headers,
+        )
+        resp.raise_for_status()
+
+    content_type = resp.headers.get("content-type", "")
+    body = None
+    if content_type.startswith("application/json"):
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+
+    # Mailcow returns [{"type":"success","msg":[...]}] on success,
+    # or [{"type":"danger"/"error","msg":"..."}] on failure.
+    if body and isinstance(body, list):
+        item = body[0] if body else {}
+        item_type = item.get("type", "") if isinstance(item, dict) else ""
+        if item_type in ("danger", "error"):
+            msg = item.get("msg", "Unknown error")
+            if isinstance(msg, list):
+                msg = " ".join(str(m) for m in msg)
+            raise RuntimeError(f"Mailcow password update failed: {msg}")
+
+    logger.info(
+        "[mailcow] do_update_mailbox_password success address=%s", full_address
+    )
+
+
+async def fetch_mobileconfig(
+    domain: str, local_part: str
+) -> bytes:
+    """Stream Apple .mobileconfig profile bytes from Mailcow.
+
+    Mailcow endpoint: GET /api/v1/get/mobileconfig/<address>
+    Returns binary application/x-apple-aspen-config plist content.
+
+    Args:
+        domain: The domain name (e.g. 'medikah.health').
+        local_part: The mailbox local part (e.g. 'dr-lopez').
+
+    Raises:
+        httpx.HTTPStatusError: on HTTP 4xx/5xx.
+        httpx.TransportError: on network failure.
+    """
+    full_address = f"{local_part}@{domain}"
+    logger.info(
+        "[mailcow] fetch_mobileconfig address=%s", full_address
+    )
+
+    api_url, api_key = _get_mailcow_api_settings()
+    headers = {
+        "X-API-Key": api_key,
+        "Content-Type": "application/json",
+    }
+    timeout = httpx.Timeout(15.0, connect=3.0)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(
+            f"{api_url.rstrip('/')}/api/v1/get/mobileconfig/{full_address}",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.content
