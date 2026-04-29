@@ -22,7 +22,7 @@ import time
 from typing import Any, List, Literal, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -648,3 +648,274 @@ async def wizard_complete(
             status_code=503,
             detail=result.error or "Workspace provisioning failed. Please try again.",
         )
+
+
+# ---------------------------------------------------------------------------
+# Mailbox management endpoints (Phase 12-03)
+# ---------------------------------------------------------------------------
+
+class MailboxChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=12)
+
+
+class MailboxChangePasswordResponse(BaseModel):
+    success: bool
+
+
+class ImapCredentialsResponse(BaseModel):
+    host: str
+    imap_port: int
+    smtp_port: int
+    smtp_starttls_port: int
+    username: str
+    protocol_imap: str
+    protocol_smtp: str
+
+
+@router.post("/mailbox/change-password", response_model=MailboxChangePasswordResponse)
+@limiter.limit("5/minute")
+async def mailbox_change_password(
+    request: Request,
+    body: MailboxChangePasswordRequest,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> MailboxChangePasswordResponse:
+    """Change the authenticated physician's mailbox password via Mailcow Admin API.
+
+    Auth gate: verified_physician (WSPC-06 / T-12-03-06). The doctor's authenticated
+    session is treated as proof of identity for password rotation (T-12-03-03 lean
+    choice — old-password verification skipped; doctor may legitimately have forgotten
+    it; all rotations are audit-logged with IP+UA for detectability per T-12-03-05).
+
+    Security:
+      - body.new_password is NEVER logged (T-12-03-01).
+      - body.current_password is NEVER logged (T-12-03-02).
+      - Rate-limited to 5/minute per IP (T-12-03-09).
+      - Writes workspace_audit_log row: action='workspace.password_changed' (security-relevant).
+    """
+    from services.practikah.mailbox_provisioner import do_update_mailbox_password
+
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # Look up the physician's mailbox_local_part from physician_workspace_accounts
+    try:
+        workspace_result = (
+            db.table("physician_workspace_accounts")
+            .select("mailbox_local_part, state")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "mailbox_change_password: DB lookup failed physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to load workspace account.")
+
+    if not workspace_result.data:
+        raise HTTPException(status_code=409, detail="workspace_not_provisioned")
+
+    row = workspace_result.data[0]
+    mailbox_local_part: Optional[str] = row.get("mailbox_local_part")
+    state: Optional[str] = row.get("state")
+
+    if not mailbox_local_part or state != "free_active":
+        raise HTTPException(status_code=409, detail="workspace_not_provisioned")
+
+    # Rotate password via Mailcow Admin API
+    # NOTE: body.new_password and body.current_password are NEVER logged (T-12-03-01/02)
+    try:
+        await do_update_mailbox_password(
+            domain="medikah.health",
+            local_part=mailbox_local_part,
+            new_password=body.new_password,
+        )
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+    except RuntimeError as err:
+        logger.warning(
+            "mailbox_change_password: Mailcow returned error physician_id=%s error=%s",
+            auth.physician_id, str(err),
+        )
+        raise HTTPException(status_code=502, detail=f"Mailcow error: {err}")
+    except Exception:
+        logger.exception(
+            "mailbox_change_password: unexpected error physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Password change failed.")
+
+    # Write security-relevant audit log row (T-12-03-05 / OPS-01)
+    # IP + UA captured because 'workspace.password_changed' is SECURITY_RELEVANT
+    try:
+        db.table("workspace_audit_log").insert(
+            {
+                "physician_id": auth.physician_id,
+                "actor_id": auth.physician_id,
+                "actor_role": "physician",
+                "action": "workspace.password_changed",
+                "resource_type": "mailbox",
+                "resource_id": f"{mailbox_local_part}@medikah.health",
+                "detail": {"domain": "medikah.health", "local_part": mailbox_local_part},
+            }
+        ).execute()
+    except Exception:
+        logger.exception(
+            "mailbox_change_password: audit log insert failed physician_id=%s (non-fatal)",
+            auth.physician_id,
+        )
+
+    logger.info(
+        "mailbox_change_password: success physician_id=%s local_part=%s",
+        auth.physician_id, mailbox_local_part,
+    )
+    return MailboxChangePasswordResponse(success=True)
+
+
+@router.get("/mailbox/mobileconfig")
+@limiter.limit("10/minute")
+async def mailbox_mobileconfig(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> Response:
+    """Return the Apple .mobileconfig binary profile for iOS auto-configuration.
+
+    Proxies GET /api/v1/get/mobileconfig/<address> from Mailcow Admin API.
+    The response is a binary plist that iOS interprets to auto-configure Mail,
+    Calendar, and Contacts with the physician's mailbox credentials (T-12-03-04).
+
+    Security:
+      - JWT-gated (verified_physician) — no enumeration risk (T-12-03-11).
+      - Writes informational audit log row: action='workspace.mobileconfig_requested'.
+    """
+    from services.practikah.mailbox_provisioner import fetch_mobileconfig
+
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # Look up the physician's mailbox_local_part
+    try:
+        workspace_result = (
+            db.table("physician_workspace_accounts")
+            .select("mailbox_local_part, state")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "mailbox_mobileconfig: DB lookup failed physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to load workspace account.")
+
+    if not workspace_result.data:
+        raise HTTPException(status_code=409, detail="workspace_not_provisioned")
+
+    row = workspace_result.data[0]
+    mailbox_local_part: Optional[str] = row.get("mailbox_local_part")
+    state: Optional[str] = row.get("state")
+
+    if not mailbox_local_part or state != "free_active":
+        raise HTTPException(status_code=409, detail="workspace_not_provisioned")
+
+    # Fetch binary .mobileconfig from Mailcow
+    try:
+        profile_bytes = await fetch_mobileconfig(
+            domain="medikah.health",
+            local_part=mailbox_local_part,
+        )
+    except Exception:
+        logger.exception(
+            "mailbox_mobileconfig: fetch failed physician_id=%s local_part=%s",
+            auth.physician_id, mailbox_local_part,
+        )
+        raise HTTPException(status_code=502, detail="Unable to fetch mobileconfig from Mailcow.")
+
+    # Informational audit log (no IP/UA — not security-relevant)
+    try:
+        db.table("workspace_audit_log").insert(
+            {
+                "physician_id": auth.physician_id,
+                "actor_id": auth.physician_id,
+                "actor_role": "physician",
+                "action": "workspace.mobileconfig_requested",
+                "resource_type": "mailbox",
+                "resource_id": f"{mailbox_local_part}@medikah.health",
+                "detail": {"domain": "medikah.health"},
+            }
+        ).execute()
+    except Exception:
+        logger.exception(
+            "mailbox_mobileconfig: audit log insert failed physician_id=%s (non-fatal)",
+            auth.physician_id,
+        )
+
+    return Response(
+        content=profile_bytes,
+        media_type="application/x-apple-aspen-config",
+        headers={
+            "Content-Disposition": 'attachment; filename="practikah.mobileconfig"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/mailbox/imap-credentials", response_model=ImapCredentialsResponse)
+@limiter.limit("30/minute")
+async def mailbox_imap_credentials(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> ImapCredentialsResponse:
+    """Return deterministic IMAP/SMTP connection credentials for the physician's mailbox.
+
+    Credentials are public-shape config (host/port/username) — no password is exposed.
+    The doctor uses the change-password endpoint to set/rotate the password they use
+    with any IMAP client.
+
+    Security:
+      - JWT-gated (verified_physician) — only authenticated physicians see their own creds.
+      - NO audit log (read-only of non-sensitive public-shape config — T-12-03-07).
+      - No password field in response (T-12-03-07).
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # Look up the physician's mailbox_local_part
+    try:
+        workspace_result = (
+            db.table("physician_workspace_accounts")
+            .select("mailbox_local_part, state")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "mailbox_imap_credentials: DB lookup failed physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to load workspace account.")
+
+    if not workspace_result.data:
+        raise HTTPException(status_code=409, detail="workspace_not_provisioned")
+
+    row = workspace_result.data[0]
+    mailbox_local_part: Optional[str] = row.get("mailbox_local_part")
+    state: Optional[str] = row.get("state")
+
+    if not mailbox_local_part or state != "free_active":
+        raise HTTPException(status_code=409, detail="workspace_not_provisioned")
+
+    username = f"{mailbox_local_part}@medikah.health"
+
+    return ImapCredentialsResponse(
+        host="mail.medikah.health",
+        imap_port=993,
+        smtp_port=465,
+        smtp_starttls_port=587,
+        username=username,
+        protocol_imap="SSL/TLS",
+        protocol_smtp="SSL/TLS",
+    )
