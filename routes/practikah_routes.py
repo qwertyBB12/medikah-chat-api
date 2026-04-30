@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Set
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
@@ -918,4 +918,362 @@ async def mailbox_imap_credentials(
         username=username,
         protocol_imap="SSL/TLS",
         protocol_smtp="SSL/TLS",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Theme endpoints (Phase 12-05)
+# ---------------------------------------------------------------------------
+
+# Server-side allowlist of WCAG-AA hex colors (mirrors WCAG_AA_PALETTE in
+# medikah-chat-frontend/lib/practikahTheme.ts — defense-in-depth per T-12-05-08).
+ALLOWED_ACCENT_COLORS: Set[str] = {
+    "#2C7A8C",  # Clinical Teal (Práctikah default)
+    "#1B5E7E",  # Deep Ocean
+    "#0F766E",  # Pine
+    "#1E40AF",  # Royal Blue
+    "#5B21B6",  # Plum
+    "#9D174D",  # Garnet
+    "#B45309",  # Amber Earth
+    "#166534",  # Forest
+    "#0E7490",  # Cyan Slate
+    "#7C2D12",  # Burnt Sienna
+    "#3730A3",  # Indigo
+    "#831843",  # Wine
+}
+
+# Normalize to uppercase for comparison (hex values are case-insensitive)
+ALLOWED_ACCENT_COLORS_NORMALIZED: Set[str] = {c.upper() for c in ALLOWED_ACCENT_COLORS}
+
+
+class ThemeRequest(BaseModel):
+    layout_variant: Literal["classic", "editorial", "minimal"]
+    accent_color: str = Field(..., pattern=r"^#[0-9A-Fa-f]{6}$")
+    font_weight: Literal["light", "regular", "bold"]
+    favicon_url: Optional[str] = None
+    office_photo_urls: List[str] = Field(default_factory=list, max_length=6)
+
+
+class ThemeResponse(BaseModel):
+    physician_id: str
+    layout_variant: str
+    accent_color: str
+    font_weight: str
+    favicon_url: Optional[str]
+    office_photo_urls: List[str]
+    updated_at: str
+
+
+def _validate_storage_url(url: Optional[str], prefix: Optional[str]) -> bool:
+    """Return True if the URL is None (allowed) or starts with the Supabase Storage CDN prefix.
+
+    T-12-05-04: rejects off-platform image embedding.
+    If SUPABASE_STORAGE_PUBLIC_URL_PREFIX is not set, validation is skipped (dev/test mode).
+    """
+    if url is None:
+        return True
+    if not prefix:
+        # No prefix configured — allow any (dev/test mode without storage)
+        return True
+    return url.startswith(prefix)
+
+
+@router.get("/theme", response_model=ThemeResponse)
+@limiter.limit("30/minute")
+async def get_theme(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> ThemeResponse:
+    """Return the authenticated physician's website theme row.
+
+    Returns 404 with detail='no_theme' if the doctor hasn't claimed Try Pro yet.
+    The BFF (pages/api/practikah/theme/get.ts) maps 404 → DEFAULT_THEME for the editor.
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        result = (
+            db.table("physician_website_themes")
+            .select("*")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "get_theme: DB error physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to load theme.")
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="no_theme")
+
+    row = result.data[0]
+    return ThemeResponse(
+        physician_id=row["physician_id"],
+        layout_variant=row.get("layout_variant", "classic"),
+        accent_color=row.get("accent_color", "#2C7A8C"),
+        font_weight=row.get("font_weight", "regular"),
+        favicon_url=row.get("favicon_url"),
+        office_photo_urls=row.get("office_photo_urls") or [],
+        updated_at=str(row.get("updated_at", "")),
+    )
+
+
+@router.put("/theme", response_model=ThemeResponse)
+@limiter.limit("10/minute")
+async def put_theme(
+    request: Request,
+    body: ThemeRequest,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> ThemeResponse:
+    """Upsert the authenticated physician's website theme.
+
+    Validates:
+      - accent_color is in the ALLOWED_ACCENT_COLORS server-side allowlist (T-12-05-08)
+      - favicon_url and all office_photo_urls start with SUPABASE_STORAGE_PUBLIC_URL_PREFIX (T-12-05-04)
+
+    Writes workspace_audit_log row: action='workspace.theme_changed' (T-12-05-06).
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # Server-side WCAG-AA palette enforcement (T-12-05-08)
+    if body.accent_color.upper() not in ALLOWED_ACCENT_COLORS_NORMALIZED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"accent_color '{body.accent_color}' is not in the approved WCAG-AA palette.",
+        )
+
+    # Off-platform URL injection prevention (T-12-05-04)
+    storage_prefix: Optional[str] = os.environ.get("SUPABASE_STORAGE_PUBLIC_URL_PREFIX")
+    if not _validate_storage_url(body.favicon_url, storage_prefix):
+        raise HTTPException(
+            status_code=400,
+            detail="favicon_url must point to Supabase Storage (SUPABASE_STORAGE_PUBLIC_URL_PREFIX).",
+        )
+    for photo_url in body.office_photo_urls:
+        if not _validate_storage_url(photo_url, storage_prefix):
+            raise HTTPException(
+                status_code=400,
+                detail=f"office_photo_url '{photo_url}' must point to Supabase Storage.",
+            )
+
+    # Upsert physician_website_themes
+    try:
+        result = (
+            db.table("physician_website_themes")
+            .upsert(
+                {
+                    "physician_id": auth.physician_id,
+                    "layout_variant": body.layout_variant,
+                    "accent_color": body.accent_color,
+                    "font_weight": body.font_weight,
+                    "favicon_url": body.favicon_url,
+                    "office_photo_urls": body.office_photo_urls,
+                },
+                on_conflict="physician_id",
+            )
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "put_theme: upsert failed physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to save theme.")
+
+    # Fetch back to get server-assigned updated_at
+    try:
+        fetch_result = (
+            db.table("physician_website_themes")
+            .select("*")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+        row = fetch_result.data[0] if fetch_result.data else {}
+    except Exception:
+        logger.warning(
+            "put_theme: fetch-back failed physician_id=%s (non-fatal)", auth.physician_id
+        )
+        row = {}
+
+    # Audit log — informational (T-12-05-06)
+    try:
+        db.table("workspace_audit_log").insert(
+            {
+                "physician_id": auth.physician_id,
+                "actor_id": auth.physician_id,
+                "actor_role": "physician",
+                "action": "workspace.theme_changed",
+                "resource_type": "theme",
+                "resource_id": None,
+                "detail": {
+                    "layout_variant": body.layout_variant,
+                    "accent_color": body.accent_color,
+                    "font_weight": body.font_weight,
+                },
+            }
+        ).execute()
+    except Exception:
+        logger.warning(
+            "put_theme: audit log failed physician_id=%s (non-fatal)", auth.physician_id
+        )
+
+    logger.info(
+        "put_theme: success physician_id=%s layout=%s accent=%s font=%s",
+        auth.physician_id, body.layout_variant, body.accent_color, body.font_weight,
+    )
+
+    return ThemeResponse(
+        physician_id=auth.physician_id,
+        layout_variant=body.layout_variant,
+        accent_color=body.accent_color,
+        font_weight=body.font_weight,
+        favicon_url=body.favicon_url,
+        office_photo_urls=body.office_photo_urls,
+        updated_at=str(row.get("updated_at", "")),
+    )
+
+
+@router.put("/theme/claim", response_model=ThemeResponse)
+@limiter.limit("3/minute")
+async def claim_theme(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> ThemeResponse:
+    """One-click 'Claim Try Pro Preview' (D-19).
+
+    Creates a default-theme row in physician_website_themes if one doesn't exist.
+    Idempotent: if the row already exists, returns it unchanged (200).
+    Also sets physician_website.enabled = TRUE for this physician.
+    Writes audit row: action='workspace.site_published'.
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # Check if a theme row already exists (idempotent)
+    try:
+        existing = (
+            db.table("physician_website_themes")
+            .select("*")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "claim_theme: existing-check failed physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to check theme status.")
+
+    if existing.data:
+        # Already claimed — idempotent 200
+        row = existing.data[0]
+        logger.info(
+            "claim_theme: already claimed physician_id=%s (idempotent)", auth.physician_id
+        )
+        return ThemeResponse(
+            physician_id=row["physician_id"],
+            layout_variant=row.get("layout_variant", "classic"),
+            accent_color=row.get("accent_color", "#2C7A8C"),
+            font_weight=row.get("font_weight", "regular"),
+            favicon_url=row.get("favicon_url"),
+            office_photo_urls=row.get("office_photo_urls") or [],
+            updated_at=str(row.get("updated_at", "")),
+        )
+
+    # Create default theme row
+    try:
+        insert_result = (
+            db.table("physician_website_themes")
+            .insert(
+                {
+                    "physician_id": auth.physician_id,
+                    "layout_variant": "classic",
+                    "accent_color": "#2C7A8C",
+                    "font_weight": "regular",
+                    "favicon_url": None,
+                    "office_photo_urls": [],
+                }
+            )
+            .execute()
+        )
+        row = insert_result.data[0] if insert_result.data else {}
+    except Exception:
+        logger.exception(
+            "claim_theme: insert failed physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to claim Try Pro preview.")
+
+    # Set physician_website.enabled = TRUE (claim implies publish — WEB-18 default state)
+    try:
+        db.table("physician_website").upsert(
+            {
+                "physician_id": auth.physician_id,
+                "enabled": True,
+                "published_at": "now()",
+            },
+            on_conflict="physician_id",
+        ).execute()
+    except Exception:
+        logger.warning(
+            "claim_theme: physician_website.enabled update failed physician_id=%s (non-fatal)",
+            auth.physician_id,
+        )
+
+    # Fetch physician slug for audit log detail
+    slug = ""
+    try:
+        from utils.slug import name_to_slug
+        physician_result = (
+            db.table("physicians")
+            .select("full_name")
+            .eq("id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+        if physician_result.data:
+            slug = name_to_slug(physician_result.data[0].get("full_name", ""))
+    except Exception:
+        logger.warning(
+            "claim_theme: slug lookup failed physician_id=%s (non-fatal)", auth.physician_id
+        )
+
+    # Audit log — 'workspace.site_published' (T-12-05-06)
+    try:
+        db.table("workspace_audit_log").insert(
+            {
+                "physician_id": auth.physician_id,
+                "actor_id": auth.physician_id,
+                "actor_role": "physician",
+                "action": "workspace.site_published",
+                "resource_type": "website",
+                "resource_id": None,
+                "detail": {
+                    "preview_url": f"https://{slug}.medikah.health" if slug else None,
+                },
+            }
+        ).execute()
+    except Exception:
+        logger.warning(
+            "claim_theme: audit log failed physician_id=%s (non-fatal)", auth.physician_id
+        )
+
+    logger.info(
+        "claim_theme: success physician_id=%s slug=%s", auth.physician_id, slug
+    )
+
+    return ThemeResponse(
+        physician_id=auth.physician_id,
+        layout_variant="classic",
+        accent_color="#2C7A8C",
+        font_weight="regular",
+        favicon_url=None,
+        office_photo_urls=[],
+        updated_at=str(row.get("updated_at", "")),
     )
