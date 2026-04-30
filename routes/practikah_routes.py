@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, List, Literal, Optional, Set
 from uuid import uuid4
 
@@ -1277,3 +1278,92 @@ async def claim_theme(
         office_photo_urls=[],
         updated_at=str(row.get("updated_at", "")),
     )
+
+
+# ---------------------------------------------------------------------------
+# Engagement tracking endpoint (Phase 12-07)
+# ---------------------------------------------------------------------------
+
+class EngagementTrackRequest(BaseModel):
+    event: Literal[
+        "theme_edit",
+        "preview_visit",
+        "share_link_copied",
+        "cta_dismissed",
+        "upgrade_interest",
+    ]
+
+
+class EngagementTrackResponse(BaseModel):
+    ok: bool
+
+
+@router.post("/engagement/track", response_model=EngagementTrackResponse)
+@limiter.limit("60/minute")
+async def engagement_track(
+    request: Request,
+    body: EngagementTrackRequest,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> EngagementTrackResponse:
+    """Record an engagement event for the free-tier upgrade CTA heuristic (FREE-08 / D-20).
+
+    High-volume informational endpoint (up to 60 events/min per physician).
+    Increments the matching counter in physician_workspace_accounts.engagement_counters JSONB.
+    Also records first_engaged_at on the first ever event, and cta_dismissed_at on dismissal.
+
+    Security notes (T-12-07-01):
+      - Counters are doctor-owned (no cross-tenant risk).
+      - Worst-case manipulation: doctor bumps their own theme_edit count to force-show
+        their own banner — no security impact.
+      - NOT audit-logged (engagement is high-volume informational; not security-relevant).
+
+    Per T-12-07-03: rate-limited to 60/minute per IP via SlowAPI.
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        # Read current engagement_counters for this physician
+        row_result = (
+            db.table("physician_workspace_accounts")
+            .select("engagement_counters")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "engagement_track: DB read failed physician_id=%s", auth.physician_id
+        )
+        raise HTTPException(status_code=500, detail="Unable to load engagement data.")
+
+    if not row_result.data:
+        raise HTTPException(status_code=409, detail="workspace_not_found")
+
+    counters: dict = dict(row_result.data[0].get("engagement_counters") or {})
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if body.event == "cta_dismissed":
+        counters["cta_dismissed"] = int(counters.get("cta_dismissed") or 0) + 1
+        counters["cta_dismissed_at"] = now_iso
+    else:
+        counters[body.event] = int(counters.get(body.event) or 0) + 1
+        if not counters.get("first_engaged_at"):
+            counters["first_engaged_at"] = now_iso
+
+    try:
+        db.table("physician_workspace_accounts").update(
+            {"engagement_counters": counters}
+        ).eq("physician_id", auth.physician_id).execute()
+    except Exception:
+        logger.exception(
+            "engagement_track: DB update failed physician_id=%s event=%s",
+            auth.physician_id, body.event,
+        )
+        raise HTTPException(status_code=500, detail="Unable to save engagement event.")
+
+    logger.info(
+        "engagement_track: physician_id=%s event=%s", auth.physician_id, body.event
+    )
+    return EngagementTrackResponse(ok=True)
