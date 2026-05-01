@@ -30,3 +30,9 @@ yarn.lock
 # Logs
 logs/
 *.log
+
+# Next.js build artifact (anomaly in API repo)
+.next/
+
+# Sanity CMS exploration (not part of API)
+sanity/
