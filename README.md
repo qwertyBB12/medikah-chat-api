@@ -1,3 +1,12 @@
+## Governance Integration
+
+@extends /.governance/guides/06-medikah.md
+
+**Always read first:**
+1. `/.governance/CLAUDE.md`
+2. `/.governance/quick-ref/forbidden.md`
+3. This file
+
 # Medikah Chat API
 
 This repository contains the FastAPI backend for the Medikah triage and scheduling
