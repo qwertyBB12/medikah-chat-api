@@ -12,3 +12,4 @@ supabase
 httpx
 tenacity
 pyjwt[crypto]
+stripe

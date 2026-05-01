@@ -1367,3 +1367,140 @@ async def engagement_track(
         "engagement_track: physician_id=%s event=%s", auth.physician_id, body.event
     )
     return EngagementTrackResponse(ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 13-01: Stripe webhook + Customer Portal BFF
+# ---------------------------------------------------------------------------
+
+# Frontend URL used to build the Customer Portal return_url. Falls back to
+# the production base URL; localhost during dev.
+_FRONTEND_URL = (
+    os.environ.get("PRACTIKAH_FRONTEND_URL")
+    or os.environ.get("NEXT_PUBLIC_BASE_URL")
+    or "https://medikah.health"
+)
+
+
+@router.post("/stripe/webhook")
+@limiter.limit("120/minute")
+async def stripe_webhook(request: Request) -> dict[str, Any]:
+    """Stripe webhook entry point — signature-verified + idempotent dispatch.
+
+    Per D-13: this is the SOLE writer of subscription state on
+    physician_workspace_accounts (alongside dunning_state_machine.py from 13-09).
+
+    Per T-13-01-01: NOT behind verified_physician — auth is the
+    Stripe-Signature header HMAC, validated against STRIPE_WEBHOOK_SECRET.
+
+    Per T-13-01-02: signature is computed over the EXACT raw body. The
+    Next.js BFF (pages/api/practikah/upgrade/webhook.ts) must disable
+    bodyParser; this handler reads request.body() raw, never request.json().
+    """
+    from services.practikah.stripe_webhook import verify_signature, handle_event
+
+    raw_body = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
+
+    try:
+        event = verify_signature(raw_body, sig_header)
+    except ValueError as err:
+        logger.warning("stripe_webhook: signature verification failed: %s", err)
+        raise HTTPException(status_code=400, detail=f"signature: {err}")
+    except Exception as err:
+        # SignatureVerificationError from stripe SDK isn't a ValueError on all
+        # versions — catch broadly here; we never want a 5xx for a malformed
+        # signature (Stripe will retry forever otherwise).
+        logger.warning("stripe_webhook: verify_signature raised: %s", err)
+        raise HTTPException(status_code=400, detail=f"signature: {err}")
+
+    db = get_supabase()
+    if db is None:
+        # Non-prod fallback: if Supabase isn't configured, acknowledge to
+        # Stripe so dev environments don't accumulate retries. Production
+        # forces Supabase to be configured (db.client.is_production()).
+        logger.error("stripe_webhook: Supabase not configured — event %s acknowledged but NOT processed",
+                     getattr(event, "id", "?"))
+        return {"received": True, "status": "supabase_unconfigured"}
+
+    result = await handle_event(event, db, raw_body=raw_body)
+    return {"received": True, **result}
+
+
+class BillingPortalLinkResponse(BaseModel):
+    url: str
+
+
+@router.post("/billing/portal-link", response_model=BillingPortalLinkResponse)
+@limiter.limit("10/minute")
+async def billing_portal_link(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> BillingPortalLinkResponse:
+    """Return a fresh Stripe Customer Portal session URL for the authenticated physician.
+
+    Per D-09 / T-13-01-08: Portal URLs are short-lived (Stripe-default ~5min)
+    and bound to the customer_id. This BFF lookup ensures only the physician
+    owning the customer_id receives the URL.
+
+    No audit log — Stripe records Portal session creation on its side and
+    the payment / subscription mutations the physician makes via the Portal
+    return as webhook events that ARE audited (D-13).
+    """
+    import stripe  # lazy import — avoids hard dep when stripe isn't installed yet
+
+    stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
+    if not stripe_secret:
+        raise HTTPException(status_code=503, detail="Stripe is not configured.")
+    stripe.api_key = stripe_secret
+
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # Look up the physician's stripe_customer_id.
+    try:
+        result = (
+            db.table("physician_workspace_accounts")
+            .select("stripe_customer_id")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "billing_portal_link: DB lookup failed physician_id=%s",
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=500, detail="Unable to load workspace account.")
+
+    customer_id: Optional[str] = None
+    if result.data:
+        customer_id = result.data[0].get("stripe_customer_id")
+
+    if not customer_id:
+        raise HTTPException(status_code=404, detail="No subscription on file")
+
+    portal_config_id = os.environ.get("STRIPE_PORTAL_CONFIGURATION_ID")
+    return_url = f"{_FRONTEND_URL}/physicians/dashboard/workspace/billing"
+
+    try:
+        kwargs: dict[str, Any] = {
+            "customer": customer_id,
+            "return_url": return_url,
+        }
+        if portal_config_id:
+            kwargs["configuration"] = portal_config_id
+        session = stripe.billing_portal.Session.create(**kwargs)
+    except Exception as err:
+        logger.exception(
+            "billing_portal_link: stripe.billing_portal.Session.create failed "
+            "physician_id=%s customer_id=%s",
+            auth.physician_id, customer_id,
+        )
+        raise HTTPException(status_code=502, detail=f"Stripe error: {err}")
+
+    return BillingPortalLinkResponse(url=session.url)
+
