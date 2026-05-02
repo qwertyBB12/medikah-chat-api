@@ -37,6 +37,10 @@ from services.practikah.orchestrator import (
 )
 from services.practikah.audit import ProvisioningLogWriter
 from services.practikah.availability import check_availability as upgrade_check_availability
+from services.practikah.sat_compliance_gate import (
+    is_sat_blocked,
+    is_supported_country,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1527,3 +1531,73 @@ async def upgrade_availability(
     if not domain or len(domain) > 253:
         raise HTTPException(status_code=400, detail="invalid domain")
     return await upgrade_check_availability(domain)
+
+
+# ---------------------------------------------------------------------------
+# Phase 13-03: SAT compliance gate (D-22) + launch-scope guard (D-23)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/upgrade/sat-status")
+@limiter.limit("30/minute")
+async def upgrade_sat_status(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+):
+    """Return the SAT-compliance + launch-scope status for the authenticated physician.
+
+    Surfaces two booleans the upgrade wizard uses to render the right UX:
+      - ``supported``: physician's country is in the Phase 13 launch scope (MX + US).
+      - ``sat_blocked``: physician is Mexican and ``MEDIKAH_MX_SAT_REGISTERED`` is OFF.
+
+    Per T-13-03-01: this endpoint is a UX hint only. The security control is
+    ``assert_eligible(physician.country)`` invoked inside the /upgrade/checkout
+    handler (Plan 13-05) before ``stripe.checkout.Session.create``.
+
+    Per T-13-03-03: response leaks no PII beyond the physician's own country
+    code and two booleans — nothing the physician doesn't already know about
+    themselves.
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        result = (
+            db.table("physicians")
+            .select("country")
+            .eq("id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "upgrade_sat_status: DB lookup failed physician_id=%s",
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=500, detail="Unable to load physician record.")
+
+    country = ""
+    if result.data:
+        country = (result.data[0].get("country") or "").upper().strip()
+
+    blocked = is_sat_blocked(country)
+    supported = is_supported_country(country)
+    if blocked:
+        message_key = "sat.blocked"
+    elif not supported:
+        message_key = "country.not_supported"
+    else:
+        message_key = None
+
+    return {
+        "country": country,
+        "supported": supported,
+        "sat_blocked": blocked,
+        "message_key": message_key,
+    }
+
+
+# TODO(13-05): call assert_eligible(physician.country) before stripe.checkout.Session.create
+# in the /upgrade/checkout handler. SATBlockedError → 403 + sat.blocked message;
+# CountryNotSupportedError → 403 + country.not_supported message.
