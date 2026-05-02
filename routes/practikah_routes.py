@@ -36,6 +36,7 @@ from services.practikah.orchestrator import (
     provision_workspace,
 )
 from services.practikah.audit import ProvisioningLogWriter
+from services.practikah.availability import check_availability as upgrade_check_availability
 
 logger = logging.getLogger(__name__)
 
@@ -1504,3 +1505,25 @@ async def billing_portal_link(
 
     return BillingPortalLinkResponse(url=session.url)
 
+
+# ---------------------------------------------------------------------------
+# Phase 13 — Pro upsell domain availability (BFF for 13-04 search UX)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/upgrade/availability")
+@limiter.limit("30/minute")
+async def upgrade_availability(
+    request: Request,
+    domain: str,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+):
+    """Domain availability check for the Pro upsell domain-search component.
+
+    Auth-gated to verified physicians (T-13-02-03 — prevents anonymous
+    enumeration scraping). 30/min per physician matches Phase 11 read-rate
+    convention. Service layer applies CF primary + RDAP fallback per D-20.
+    """
+    if not domain or len(domain) > 253:
+        raise HTTPException(status_code=400, detail="invalid domain")
+    return await upgrade_check_availability(domain)
