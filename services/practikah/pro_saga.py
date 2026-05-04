@@ -149,6 +149,71 @@ def _log_workspace_audit(
         )
 
 
+async def _trigger_pro_live_email(
+    *,
+    db: Any,
+    physician_id: str,
+    domain: str,
+    run_id: str,
+) -> None:
+    """PRO-13: send the Pro-live transactional email after saga step 7 succeeds.
+
+    Best-effort BFF call to Next.js practikah-email-trigger which forwards to
+    ``lib/practikahEmail.ts:sendProLiveEmail``. Bilingual EN/ES content lives
+    on the frontend so the Resend API key never leaks server-side.
+    """
+    if db is None:
+        return
+    try:
+        result = (
+            db.table("physician_workspace_accounts")
+            .select("physician_email, pro_local_part")
+            .eq("physician_id", physician_id)
+            .limit(1)
+            .execute()
+        )
+        if not result.data:
+            return
+        physician_email = result.data[0].get("physician_email")
+        if not physician_email:
+            return
+    except Exception:
+        logger.exception(
+            "[pro_saga] _trigger_pro_live_email lookup failed physician_id=%s run_id=%s",
+            physician_id, run_id,
+        )
+        return
+
+    base = os.environ.get("FRONTEND_BASE_URL") or os.environ.get(
+        "NEXT_PUBLIC_BASE_URL", "https://medikah.health"
+    )
+    secret = os.environ.get("INTERNAL_API_SHARED_SECRET", "")
+    if not secret:
+        logger.info(
+            "[pro_saga] _trigger_pro_live_email skipped (no INTERNAL_API_SHARED_SECRET)"
+        )
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=3.0)) as client:
+            await client.post(
+                f"{base.rstrip('/')}/api/internal/practikah-email-trigger",
+                json={
+                    "kind": "pro_live",
+                    "to": physician_email,
+                    "domain": domain,
+                    "physician_id": physician_id,
+                    "run_id": run_id,
+                },
+                headers={"X-Internal-Secret": secret},
+            )
+    except Exception:
+        logger.exception(
+            "[pro_saga] _trigger_pro_live_email failed physician_id=%s run_id=%s",
+            physician_id, run_id,
+        )
+
+
 def _stripe_refund(stripe_session_id: str, run_id: str) -> bool:
     """Issue a full refund for the Stripe checkout session that triggered this saga.
 
@@ -525,7 +590,13 @@ async def provision_pro_upgrade(
             run_id=run_id,
             detail={"domain_id": migrated_domain_id},
         )
-        # Plan 13-09 fans out the pro_live_email here.
+        # Plan 13-09 (PRO-13): fire pro_live transactional email — bilingual.
+        await _trigger_pro_live_email(
+            db=db,
+            physician_id=physician_id,
+            domain=domain,
+            run_id=run_id,
+        )
         logger.info(
             "[pro_saga] provision_pro_upgrade SUCCESS physician_id=%s domain=%s run_id=%s",
             physician_id, domain, run_id,

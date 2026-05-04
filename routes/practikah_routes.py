@@ -1526,6 +1526,62 @@ async def billing_portal_link(
 
 
 # ---------------------------------------------------------------------------
+# Phase 13-09: Doctor-initiated transfer-out (PRO-11)
+# ---------------------------------------------------------------------------
+
+
+class BillingTransferOutResponse(BaseModel):
+    epp_code: str
+    domain: str
+
+
+@router.post("/billing/transfer-out", response_model=BillingTransferOutResponse)
+@limiter.limit("3/minute")
+async def billing_transfer_out(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> BillingTransferOutResponse:
+    """PRO-11: doctor-initiated transfer-out — returns EPP code synchronously.
+
+    Per T-13-09-04: ``physician_id`` is read from the verified-physician JWT
+    NOT from the request body — prevents elevation-of-privilege spoofing.
+    Rate-limited 3/min per the threat model.
+
+    Per T-13-09-06: the EPP code is delivered both in the response body
+    (for instant copy-to-clipboard in the dashboard) AND via authenticated
+    email (PRO-11 24h SLA). Audit log records ``epp_issued: True`` flag
+    only — never the code itself.
+    """
+    from services.practikah.dunning_state_machine import request_transfer_out
+
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        result = await request_transfer_out(db, auth.physician_id)
+    except ValueError as err:
+        raise HTTPException(status_code=404, detail=str(err))
+    except RuntimeError as err:
+        logger.exception(
+            "[billing_transfer_out] CF Registrar transfer-out failed physician_id=%s",
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=502, detail=f"Transfer-out failed: {err}")
+    except Exception as err:
+        logger.exception(
+            "[billing_transfer_out] unexpected failure physician_id=%s",
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=500, detail=f"Internal error: {err}")
+
+    return BillingTransferOutResponse(
+        epp_code=result.get("epp_code", ""),
+        domain=result.get("domain", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 13 — Pro upsell domain availability (BFF for 13-04 search UX)
 # ---------------------------------------------------------------------------
 

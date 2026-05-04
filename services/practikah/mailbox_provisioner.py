@@ -930,6 +930,125 @@ class MailboxProvisioner:
             prior_result=prior_result,
         )
 
+    # ------------------------------------------------------------------
+    # Phase 13-09: Pro mailbox freeze + purge (OPS-12 / D-28)
+    # ------------------------------------------------------------------
+
+    async def freeze_pro_mailbox(self, domain: str, local_part: str) -> None:
+        """Read-only freeze on a Pro custom-domain mailbox (D-28).
+
+        Per D-28: doctor retains IMAP login + mbox export ability; SMTP send
+        and incoming receive are blocked. We toggle the Mailcow ACL flags
+        ``smtp_access=0`` + ``imap_access=1`` (and ``sieve_access=1`` for
+        export tooling) via POST ``/api/v1/edit/mailbox``. Receive is blocked
+        by setting ``quota_active=0`` + ``active=2`` (Mailcow's "disallow
+        login but keep stored mail" mode is too aggressive — we want IMAP
+        login retained).
+
+        Per T-13-09-07: this method MUST only operate on Pro custom-domain
+        mailboxes. The ``@medikah.health`` free mailbox is NEVER passed here
+        — caller (``dunning_state_machine.auto_downgrade``) reads the Pro
+        ``physician_domains`` row only.
+
+        Best-effort + readback verification (T-13-09-05): after the ACL
+        mutation we re-GET the mailbox and log a warning if the flags didn't
+        stick. Sandbox mode short-circuits with no API call.
+        """
+        if self._sandbox_mode:
+            logger.info(
+                "[mailcow] freeze_pro_mailbox sandbox short-circuit domain=%s local_part=%s",
+                domain, local_part,
+            )
+            return
+
+        full_address = f"{local_part}@{domain}"
+        logger.info(
+            "[mailcow] freeze_pro_mailbox address=%s — applying read-only ACL",
+            full_address,
+        )
+
+        # Mailcow edit/mailbox payload — bilingual sieve filter would be applied
+        # via /api/v1/add/sieve (deferred; for launch we rely on the ACL flags +
+        # the bounce that Mailcow generates when smtp_access=0 rejects SMTP).
+        try:
+            await self._request_write(
+                "POST",
+                "/api/v1/edit/mailbox",
+                {
+                    "items": [full_address],
+                    "attr": {
+                        "smtp_access": "0",
+                        "imap_access": "1",
+                        "sieve_access": "1",
+                        "active": "2",  # 2 = disallow incoming via Postfix; IMAP login OK
+                    },
+                },
+            )
+        except httpx.HTTPStatusError:
+            logger.exception(
+                "[mailcow] freeze_pro_mailbox edit failed address=%s", full_address
+            )
+        except Exception:
+            logger.exception(
+                "[mailcow] freeze_pro_mailbox unexpected error address=%s", full_address
+            )
+
+        # Readback verification (T-13-09-05) — log warning if flags didn't stick.
+        try:
+            verified = await self._get_mailbox(full_address)
+            if verified:
+                attrs = verified.get("attributes") if isinstance(verified, dict) else None
+                if isinstance(attrs, dict):
+                    smtp = str(attrs.get("smtp_access", "")).strip()
+                    imap = str(attrs.get("imap_access", "")).strip()
+                    if smtp != "0" or imap != "1":
+                        logger.warning(
+                            "[mailcow] freeze_pro_mailbox ACL drift — expected smtp=0/imap=1 "
+                            "got smtp=%s imap=%s address=%s", smtp, imap, full_address,
+                        )
+        except Exception:
+            logger.exception(
+                "[mailcow] freeze_pro_mailbox readback failed address=%s", full_address
+            )
+
+    async def purge_pro_mailbox(self, domain: str, local_part: str) -> None:
+        """Final purge after FROZEN_HOLD_DAYS or transfer-out completion (D-28).
+
+        Deletes the mailbox via Mailcow ``/api/v1/delete/mailbox``. Best-effort —
+        404 / "not found" is tolerated (mailbox may already be gone).
+
+        Per T-13-09-07: only Pro custom-domain mailboxes are passed here.
+        """
+        if self._sandbox_mode:
+            logger.info(
+                "[mailcow] purge_pro_mailbox sandbox short-circuit domain=%s local_part=%s",
+                domain, local_part,
+            )
+            return
+
+        full_address = f"{local_part}@{domain}"
+        logger.info(
+            "[mailcow] purge_pro_mailbox address=%s", full_address
+        )
+
+        try:
+            await self._request_write(
+                "POST", "/api/v1/delete/mailbox", [full_address]
+            )
+        except httpx.HTTPStatusError as err:
+            if err.response.status_code == 404:
+                logger.info(
+                    "[mailcow] purge_pro_mailbox already deleted address=%s", full_address
+                )
+            else:
+                logger.exception(
+                    "[mailcow] purge_pro_mailbox failed address=%s", full_address
+                )
+        except Exception:
+            logger.exception(
+                "[mailcow] purge_pro_mailbox unexpected error address=%s", full_address
+            )
+
 
 # ---------------------------------------------------------------------------
 # Module-level mailbox helpers for Phase 12-03 (password rotation + mobileconfig)

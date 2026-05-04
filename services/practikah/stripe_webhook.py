@@ -395,67 +395,29 @@ async def _on_invoice_payment_succeeded(event: dict[str, Any], db: Any) -> dict[
 
 
 async def _on_invoice_payment_failed(event: dict[str, Any], db: Any) -> dict[str, Any]:
-    """Hand off to dunning state machine (stub — Plan 13-09).
+    """Hand off to dunning state machine (Phase 13-09).
 
-    Today we just record the event; 13-09 wires the retry/grace logic.
+    Per D-11: Stripe Smart Retries owns the 3 retry emails. We listen for
+    the events and either bump the retry counter (non-final) or transition
+    to the 7-day grace period (final). The dunning module is the sole
+    branch that mutates ``subscription_status`` for past_due / grace.
     """
-    obj = event["data"]["object"]
-    subscription_id = obj.get("subscription")
-    customer_id = obj.get("customer")
-    physician_id = (
-        _physician_id_by_subscription(db, subscription_id)
-        or _physician_id_by_customer(db, customer_id)
-    )
+    from services.practikah.dunning_state_machine import on_payment_failed
 
-    # TODO(13-09): dispatch into dunning state machine.
-    # from services.practikah.dunning_state_machine import on_payment_failed
-    # await on_payment_failed(event, db)
-
-    if physician_id:
-        try:
-            db.table("physician_workspace_accounts").update(
-                {"subscription_status": "past_due"}
-            ).eq("physician_id", physician_id).execute()
-        except Exception:
-            logger.exception(
-                "[stripe_webhook] invoice.payment_failed: past_due update failed "
-                "physician_id=%s", physician_id,
-            )
-
-    return {"dispatched": "invoice.payment_failed", "physician_id": physician_id}
+    return await on_payment_failed(db, event)
 
 
 async def _on_subscription_deleted(event: dict[str, Any], db: Any) -> dict[str, Any]:
     """Auto-downgrade to free when Stripe reports the subscription as deleted (D-13).
 
-    The dunning state machine (Plan 13-09) handles the multi-step downgrade
-    (mailbox freeze → purge → domain release). Today we just flip status so
-    UI/middleware reflect reality.
+    Delegates entirely to the dunning state machine (Phase 13-09) which runs
+    the atomic downgrade flow per D-28: mailbox freeze → CF for SaaS detach →
+    ``physician_website.published_to_domain_id`` NULL → tier='free' →
+    schedule mailbox purge after FROZEN_HOLD_DAYS.
     """
-    obj = event["data"]["object"]
-    subscription_id = obj.get("id")
-    customer_id = obj.get("customer")
-    physician_id = (
-        _physician_id_by_subscription(db, subscription_id)
-        or _physician_id_by_customer(db, customer_id)
-    )
+    from services.practikah.dunning_state_machine import auto_downgrade
 
-    # TODO(13-09): dispatch into dunning state machine for full auto-downgrade saga.
-    # from services.practikah.dunning_state_machine import auto_downgrade
-    # await auto_downgrade(event, db)
-
-    if physician_id:
-        try:
-            db.table("physician_workspace_accounts").update(
-                {"subscription_status": "canceled", "tier": "free"}
-            ).eq("physician_id", physician_id).execute()
-        except Exception:
-            logger.exception(
-                "[stripe_webhook] customer.subscription.deleted: downgrade update failed "
-                "physician_id=%s", physician_id,
-            )
-
-    return {"dispatched": "customer.subscription.deleted", "physician_id": physician_id}
+    return await auto_downgrade(db, event)
 
 
 async def _on_subscription_updated(event: dict[str, Any], db: Any) -> dict[str, Any]:
