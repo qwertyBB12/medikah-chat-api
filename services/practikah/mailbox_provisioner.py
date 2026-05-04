@@ -20,6 +20,7 @@ mailbox-deletion-first naturally. undo_add_domain still logs (does not raise) on
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import quote
@@ -758,6 +759,177 @@ class MailboxProvisioner:
             error="DKIM key created but not retrievable — Mailcow may need a moment to propagate",
         )
 
+    # ------------------------------------------------------------------
+    # Phase 13-06: per-domain DKIM (D-30) and Pro mailbox provisioning
+    # ------------------------------------------------------------------
+
+    async def get_per_domain_dkim(self, domain: str, run_id: str) -> dict[str, Any]:
+        """Generate (or fetch) a *per-domain* DKIM key + selector via Mailcow (D-30).
+
+        Pro custom domains MUST use a per-domain selector — never the shared
+        ``mcdkim`` selector that ``do_get_dkim`` uses for free-tier
+        ``medikah.health``. This method:
+
+          1. GETs ``/api/v1/get/dkim/<domain>`` — if a per-domain key already
+             exists (idempotency), returns ``{selector, public_key}``.
+          2. Otherwise POSTs ``/api/v1/add/dkim`` with a freshly generated
+             selector ``medikah<unix_seconds>`` (so retried runs don't collide
+             with prior runs) and ``key_size=2048``.
+          3. Re-fetches and returns ``{selector, public_key}``.
+
+        The returned ``public_key`` is the full TXT record VALUE consumed by
+        ``dns_template.compose_pro_dns_records``.
+
+        Sandbox short-circuits to a deterministic stub so 13-10 dry-runs work.
+
+        Returns:
+            ``{"selector": str, "public_key": str}`` on success.
+
+        Raises:
+            RuntimeError: if Mailcow returns an error envelope or the re-fetch
+                returns an empty body (saga step 3 then transitions per D-15).
+        """
+        import time as _time
+
+        effective_domain = self._maybe_sandbox_prefix(domain)
+        logger.info(
+            "[mailcow] get_per_domain_dkim domain=%s effective=%s run_id=%s sandbox=%s",
+            domain, effective_domain, run_id, self._sandbox_mode,
+        )
+
+        if self._sandbox_mode:
+            sandbox_selector = f"sandbox{int(_time.time())}"
+            return {
+                "selector": sandbox_selector,
+                "public_key": (
+                    "v=DKIM1; k=rsa; p=SANDBOX_PUBKEY_"
+                    f"{effective_domain.replace('.', '_')}"
+                ),
+            }
+
+        # 1. Idempotency: existing key?
+        try:
+            existing = await self._get_dkim(effective_domain)
+        except httpx.TransportError as err:
+            raise RuntimeError(
+                f"per-domain DKIM lookup transport error: {err}"
+            ) from err
+
+        def _extract(payload: dict[str, Any]) -> Optional[dict[str, str]]:
+            sel = payload.get("dkim_selector") or payload.get("selector")
+            pub = payload.get("dkim_txt") or (
+                f"v=DKIM1; k=rsa; p={payload['pubkey']}"
+                if payload.get("pubkey")
+                else None
+            )
+            if sel and pub:
+                return {"selector": sel, "public_key": pub}
+            return None
+
+        if existing:
+            extracted = _extract(existing)
+            if extracted:
+                # Defensive: ensure selector is NOT the shared mcdkim free-tier one.
+                if extracted["selector"] == DEFAULT_DKIM_SELECTOR:
+                    logger.warning(
+                        "[mailcow] get_per_domain_dkim existing key uses shared selector "
+                        "%s for domain=%s — replacing with per-domain key (D-30)",
+                        DEFAULT_DKIM_SELECTOR, effective_domain,
+                    )
+                else:
+                    return extracted
+
+        # 2. Create with a per-domain selector. Unix-seconds suffix lets retries
+        #    after deletion produce distinct selectors without collision.
+        per_domain_selector = f"medikah{int(_time.time())}"
+        create_body: dict[str, Any] = {
+            "domains": [effective_domain],
+            "dkim_selector": per_domain_selector,
+            "key_size": 2048,
+        }
+        try:
+            create_response = await self._request_write(
+                "POST", "/api/v1/add/dkim", create_body
+            )
+        except httpx.HTTPStatusError as err:
+            raise RuntimeError(f"per-domain DKIM create HTTP error: {err}") from err
+
+        success, error_msg = self._parse_mailcow_write_response(create_response)
+        if not success:
+            raise RuntimeError(
+                f"per-domain DKIM create failed for {effective_domain}: {error_msg}"
+            )
+
+        # 3. Re-fetch
+        try:
+            fetched = await self._get_dkim(effective_domain)
+        except httpx.TransportError as err:
+            raise RuntimeError(
+                f"per-domain DKIM re-fetch transport error: {err}"
+            ) from err
+
+        if not fetched:
+            raise RuntimeError(
+                f"per-domain DKIM key created but re-fetch returned empty for {effective_domain}"
+            )
+
+        extracted = _extract(fetched)
+        if not extracted:
+            raise RuntimeError(
+                f"per-domain DKIM re-fetch returned unexpected payload for {effective_domain}"
+            )
+        return extracted
+
+    async def do_provision_pro_mailbox(
+        self,
+        domain: str,
+        local_part: str,
+        password: str,
+        run_id: str,
+        *,
+        quota_mb: int = DEFAULT_QUOTA_MB,
+    ) -> MailcowResult:
+        """Provision ``<local_part>@<domain>`` on the shared Mailcow VPS (PRO-15).
+
+        Mailcow is multi-domain native — Pro mailboxes live on the same VPS as
+        free-tier ``medikah.health`` mailboxes. This method delegates to
+        ``do_add_mailbox`` after the saga's step 4 has added the domain via
+        ``do_add_domain``.
+
+        Security: ``password`` is NEVER logged (T-13-06-09).
+
+        Returns:
+            ``MailcowResult`` with ``resource_id='<local_part>@<domain>'`` on success.
+        """
+        # do_add_mailbox already applies sandbox-prefix + idempotency + password
+        # masking, so this is a thin pass-through that gives the saga a clearly
+        # named entrypoint.
+        return await self.do_add_mailbox(
+            local_part=local_part,
+            domain=domain,
+            password=password,
+            run_id=run_id,
+            quota_mb=quota_mb,
+        )
+
+    async def undo_provision_pro_mailbox(
+        self,
+        domain: str,
+        local_part: str,
+        run_id: str,
+        prior_result: MailcowResult,
+    ) -> None:
+        """Compensating action for ``do_provision_pro_mailbox`` (non-raising).
+
+        Delegates to ``undo_add_mailbox``. Per D-10 / D-15 this MUST NOT raise.
+        """
+        await self.undo_add_mailbox(
+            local_part=local_part,
+            domain=domain,
+            run_id=run_id,
+            prior_result=prior_result,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Module-level mailbox helpers for Phase 12-03 (password rotation + mobileconfig)
@@ -893,3 +1065,48 @@ async def fetch_mobileconfig(
         )
         resp.raise_for_status()
         return resp.content
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton for Phase 13-06 saga import sites
+# ---------------------------------------------------------------------------
+# The Pro upgrade saga (services/practikah/pro_saga.py) imports this directly
+# rather than going through the orchestrator's lazy ``get_mailbox_provisioner``
+# accessor. We auto-engage sandbox mode when MAILCOW_API_KEY is unset so the
+# import-time singleton stays valid in tests / CI.
+
+_SANDBOX_MODE_FLAG = os.getenv("MEDIKAH_PROVISIONING_SANDBOX", "false").lower() in {
+    "1", "true", "yes", "on",
+}
+_MC_URL = os.environ.get("MAILCOW_API_URL", "https://practikah.medikah.health")
+_MC_KEY = os.environ.get("MAILCOW_API_KEY", "")
+
+
+class _SandboxMailboxProvisioner(MailboxProvisioner):
+    """Sandbox stand-in used when MAILCOW_API_KEY is unset.
+
+    Bypasses the constructor's ``api_key required`` guard so the module
+    singleton is always usable. All vendor calls short-circuit via
+    ``self._sandbox_mode=True``.
+    """
+
+    def __init__(self) -> None:
+        # Skip the parent __init__ guard entirely; set fields directly.
+        self._api_url = _MC_URL.rstrip("/") if _MC_URL else ""
+        self._api_key = ""
+        self._sandbox_mode = True
+        self._timeout = httpx.Timeout(10.0, connect=3.0)
+
+
+def _build_module_singleton() -> MailboxProvisioner:
+    if _MC_KEY:
+        return MailboxProvisioner(
+            _MC_URL, _MC_KEY, sandbox_mode=_SANDBOX_MODE_FLAG
+        )
+    # Auto-sandbox when no key is configured.
+    return _SandboxMailboxProvisioner()
+
+
+# Imported by services.practikah.pro_saga
+mailbox_provisioner = _build_module_singleton()
+
