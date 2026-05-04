@@ -227,7 +227,135 @@ UNDO_REGISTRY: dict[str, Callable[[dict[str, Any], str], Awaitable[None]]] = {
             raw_response={},
         ),
     ),
+
+    # ---------------------------------------------------------------------
+    # Phase 13-06 Pro upgrade saga steps (D-14)
+    # ---------------------------------------------------------------------
+    # Per D-15 the registrar undo is a non-destructive log-only operation
+    # (ICANN 60-day post-registration transfer lock). The registrar adapter's
+    # ``undo_register`` already encodes that contract and never raises.
+    "pro.register_domain": lambda step, run_id: _undo_pro_register_domain(step, run_id),
+    "pro.write_dns": lambda step, run_id: _undo_pro_write_dns(step, run_id),
+    "pro.provision_mailcow_domain": lambda step, run_id: get_mailbox_provisioner().undo_add_domain(
+        domain=step["detail"].get("domain", ""),
+        run_id=run_id,
+        prior_result=MailcowResult(
+            success=True,
+            resource_id=step["detail"].get("resource_id"),
+            raw_response={},
+        ),
+    ),
+    "pro.provision_pro_mailbox": lambda step, run_id: get_mailbox_provisioner().undo_provision_pro_mailbox(
+        domain=step["detail"].get("domain", ""),
+        local_part=step["detail"].get("local_part", ""),
+        run_id=run_id,
+        prior_result=MailcowResult(
+            success=True,
+            resource_id=step["detail"].get("resource_id"),
+            raw_response={},
+        ),
+    ),
+    "pro.attach_saas_hostname": lambda step, run_id: _undo_pro_attach_saas_hostname(step, run_id),
+    "pro.migrate_theme": lambda step, run_id: _undo_pro_migrate_theme(step, run_id),
 }
+
+
+# ---------------------------------------------------------------------------
+# Phase 13-06 undo helpers (closures over multi-record DNS + DB flips)
+# ---------------------------------------------------------------------------
+
+async def _undo_pro_register_domain(step: dict[str, Any], run_id: str) -> None:
+    """Per D-15: non-destructive. Delegates to cf_registrar.undo_register
+    which logs a warning and returns."""
+    from services.practikah.cloudflare_registrar import (
+        cf_registrar,
+        RegistrarResult,
+    )
+    domain = step.get("detail", {}).get("domain", "")
+    await cf_registrar.undo_register(
+        domain=domain,
+        run_id=run_id,
+        prior_result=RegistrarResult(
+            success=True,
+            resource_id=step.get("detail", {}).get("resource_id"),
+            raw_response={},
+        ),
+    )
+
+
+async def _undo_pro_write_dns(step: dict[str, Any], run_id: str) -> None:
+    """Best-effort cleanup of the DNS records written by saga step 3.
+
+    The step's detail carries ``record_ids`` (list of DNS record IDs) and the
+    ``zone_id`` so we can call ``undo_write_dns_record`` for each. Non-raising.
+    """
+    detail = step.get("detail", {}) or {}
+    zone_id = detail.get("zone_id")
+    record_ids = detail.get("record_ids") or []
+    if not zone_id or not record_ids:
+        logger.info(
+            "[orchestrator] _undo_pro_write_dns no zone_id/record_ids run_id=%s",
+            run_id,
+        )
+        return
+    try:
+        cf = get_cloudflare_client()
+    except RuntimeError:
+        logger.warning(
+            "[orchestrator] _undo_pro_write_dns CF client unavailable run_id=%s",
+            run_id,
+        )
+        return
+    for rid in record_ids:
+        try:
+            await cf.undo_write_dns_record(
+                zone_id=zone_id, record_id=rid, run_id=run_id
+            )
+        except Exception:
+            logger.exception(
+                "[orchestrator] _undo_pro_write_dns record failed rid=%s run_id=%s",
+                rid, run_id,
+            )
+
+
+async def _undo_pro_attach_saas_hostname(
+    step: dict[str, Any], run_id: str
+) -> None:
+    """Detach the CF for SaaS Custom Hostname (best-effort, non-raising)."""
+    from services.practikah.cloudflare_for_saas import cf_saas, SaasResult
+    hostname_id = step.get("detail", {}).get("resource_id") or ""
+    await cf_saas.undo_attach_hostname(
+        hostname_id=hostname_id,
+        run_id=run_id,
+        prior_result=SaasResult(
+            success=True, resource_id=hostname_id, raw_response={}
+        ),
+    )
+
+
+async def _undo_pro_migrate_theme(step: dict[str, Any], run_id: str) -> None:
+    """Revert the published_to_domain_id flip from saga step 7 (D-26)."""
+    from db.client import get_supabase
+    db = get_supabase()
+    if db is None:
+        logger.warning(
+            "[orchestrator] _undo_pro_migrate_theme supabase unavailable run_id=%s",
+            run_id,
+        )
+        return
+    physician_id = step.get("detail", {}).get("physician_id")
+    if not physician_id:
+        return
+    try:
+        db.table("physician_website").update(
+            {"published_to_domain_id": None}
+        ).eq("physician_id", physician_id).execute()
+    except Exception:
+        logger.exception(
+            "[orchestrator] _undo_pro_migrate_theme update failed physician_id=%s "
+            "run_id=%s",
+            physician_id, run_id,
+        )
 
 
 async def _noop_undo(step_name: str, run_id: str) -> None:
