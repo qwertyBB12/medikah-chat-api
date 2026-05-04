@@ -41,6 +41,11 @@ from services.practikah.sat_compliance_gate import (
     is_sat_blocked,
     is_supported_country,
 )
+from services.practikah.suggestion_rules import (
+    PRICING,
+    country_weighted_tlds,
+    get_pricing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1296,6 +1301,11 @@ class EngagementTrackRequest(BaseModel):
         "share_link_copied",
         "cta_dismissed",
         "upgrade_interest",
+        # Phase 13-04: Mexican physician requested a heads-up when Pro launches
+        # (SAT compliance gate from Plan 13-03 cleared). Doctor-owned counter on
+        # ``physician_workspace_accounts.engagement_counters`` per T-13-04 /
+        # T-12-07-01 — informational, not security-relevant.
+        "upgrade_sat_notify_me",
     ]
 
 
@@ -1531,6 +1541,77 @@ async def upgrade_availability(
     if not domain or len(domain) > 253:
         raise HTTPException(status_code=400, detail="invalid domain")
     return await upgrade_check_availability(domain)
+
+
+# ---------------------------------------------------------------------------
+# Phase 13-04: Pro-tier pricing matrix lookup for the DomainSearch wizard
+# ---------------------------------------------------------------------------
+
+
+class DomainSearchPricingRequest(BaseModel):
+    """Optional client-supplied country override.
+
+    The authoritative country comes from the physician record — the request
+    body is honored only when the physician's stored country is missing
+    (legacy rows). Clients should pass ``country: "MX"`` or ``country: "US"``
+    so the BFF response renders consistently across both countries during the
+    Phase 13 launch (D-23).
+    """
+
+    country: Optional[Literal["MX", "US"]] = None
+
+
+@router.post("/upgrade/domain-search")
+@limiter.limit("60/minute")
+async def upgrade_domain_search(
+    request: Request,
+    body: DomainSearchPricingRequest,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+):
+    """Return the locked Pro-tier pricing matrix per physician country.
+
+    Per D-19: deterministic suggestion generation runs client-side
+    (``medikah-chat-frontend/lib/domainSuggestions.ts``) — NO LLM at search
+    time. This endpoint exists solely to expose the locked pricing matrix per
+    PRO-02 so the wizard renders wholesale TLD price + Práctikah service fee
+    transparently without hardcoding the matrix in the browser.
+
+    Per D-23: Phase 13 ships Mexico + US only. If the physician record has no
+    country and the client did not pass one, default to US so the wizard
+    still renders something sensible — the actual eligibility gate runs in
+    /upgrade/checkout (Plan 13-05).
+    """
+
+    db = get_supabase()
+    country = (body.country or "").upper()
+    if not country and db is not None:
+        try:
+            r = (
+                db.table("physicians")
+                .select("country")
+                .eq("id", auth.physician_id)
+                .limit(1)
+                .execute()
+            )
+            if r.data:
+                country = (r.data[0].get("country") or "").upper().strip()
+        except Exception:
+            logger.exception(
+                "upgrade_domain_search: DB lookup failed physician_id=%s",
+                auth.physician_id,
+            )
+
+    if country not in ("MX", "US"):
+        country = "US"
+
+    return {
+        "country": country,
+        "pricing": {
+            "standard": get_pricing("standard", country),
+            "premium": get_pricing("premium", country),
+        },
+        "tld_weights": country_weighted_tlds(country),
+    }
 
 
 # ---------------------------------------------------------------------------
