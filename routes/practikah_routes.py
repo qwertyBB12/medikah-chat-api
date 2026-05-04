@@ -1987,3 +1987,46 @@ async def upgrade_run_by_session(
         raise HTTPException(status_code=404, detail="run not found")
 
     return RunBySessionResponse(run_id=str(row["run_id"]))
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 D-24/D-25/D-26 — active-Pro redirect map (internal endpoint)
+# ---------------------------------------------------------------------------
+#
+# Returns {slug: custom_domain} for every physician whose Pro subscription is
+# currently ``active`` AND who has a published custom domain. Consumed by the
+# Next.js edge middleware (medikah-chat-frontend/middleware.ts) via a 60s
+# in-memory cache. Authenticated by the existing INTERNAL_API_SHARED_SECRET
+# pattern (Phase 12-02 / services/practikah/notifications.py).
+#
+# Revertibility (D-25 / PRO-17): when subscription_status flips to 'canceled'
+# or published_to_domain_id is set to NULL, the slug drops out of the map on
+# the next refresh — the middleware then falls through to the existing
+# rewrite to /sites/<slug> (Try Pro surface).
+@router.get("/internal/pro-redirect-map")
+async def internal_pro_redirect_map(request: Request) -> dict[str, str]:
+    """Internal endpoint — returns {slug: custom_domain} for active Pro physicians.
+
+    Auth: ``X-Internal-Secret`` header must equal ``INTERNAL_API_SHARED_SECRET``.
+    Returns 403 otherwise. Returns ``{}`` if Supabase is unavailable
+    (fail-open contract — middleware preserves existing rewrite).
+    """
+    from services.practikah.redirect_cache import active_pro_redirect_map
+
+    expected = os.environ.get("INTERNAL_API_SHARED_SECRET", "")
+    if not expected:
+        # Misconfiguration — refuse rather than allow unauthenticated access.
+        logger.error("internal_pro_redirect_map: INTERNAL_API_SHARED_SECRET not set")
+        raise HTTPException(status_code=503, detail="internal auth not configured")
+
+    secret = request.headers.get("X-Internal-Secret", "")
+    if secret != expected:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    db = get_supabase()
+    if db is None:
+        # Fail-open: empty map → middleware preserves existing rewrite.
+        logger.warning("internal_pro_redirect_map: supabase not configured — returning empty map")
+        return {}
+
+    return await active_pro_redirect_map(db)
