@@ -37,7 +37,10 @@ from services.practikah.orchestrator import (
 )
 from services.practikah.audit import ProvisioningLogWriter
 from services.practikah.availability import check_availability as upgrade_check_availability
+from services.practikah.checkout import create_checkout_session
 from services.practikah.sat_compliance_gate import (
+    CountryNotSupportedError,
+    SATBlockedError,
     is_sat_blocked,
     is_supported_country,
 )
@@ -1679,6 +1682,189 @@ async def upgrade_sat_status(
     }
 
 
-# TODO(13-05): call assert_eligible(physician.country) before stripe.checkout.Session.create
-# in the /upgrade/checkout handler. SATBlockedError → 403 + sat.blocked message;
-# CountryNotSupportedError → 403 + country.not_supported message.
+# ---------------------------------------------------------------------------
+# Phase 13-05: Stripe Checkout session creation (/upgrade/checkout)
+# ---------------------------------------------------------------------------
+
+
+class CheckoutRequest(BaseModel):
+    """POST body for /practikah/upgrade/checkout (Plan 13-05).
+
+    The physician's authoritative country is sourced from the ``physicians``
+    row (T-13-05-02) — never from the request body — so a tampered client
+    cannot bypass the SAT compliance gate.
+    """
+
+    tld_class: Literal["standard", "premium"]
+    cadence: Literal["annual", "monthly"]
+    domain: str = Field(..., min_length=4, max_length=253)
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+    session_id: str
+
+
+@router.post("/upgrade/checkout", response_model=CheckoutResponse)
+@limiter.limit("10/minute")
+async def upgrade_checkout(
+    request: Request,
+    body: CheckoutRequest,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> CheckoutResponse:
+    """Create a Stripe Checkout Session for the Pro upgrade flow.
+
+    Per D-22 / T-13-05-02: ``assert_eligible(physician.country)`` is the FIRST
+    Stripe-touching statement (inside ``create_checkout_session``). Mexican
+    physicians while ``MEDIKAH_MX_SAT_REGISTERED`` is OFF → HTTP 403 with the
+    bilingual ``SAT_BLOCKED`` envelope. Non-MX/non-US physicians → HTTP 403
+    with the ``COUNTRY_NOT_SUPPORTED`` envelope.
+
+    Per PRO-04 / D-05: currency is routed by ``physician.country`` (MXN for
+    MX, USD for US). Per D-06 / PRO-09: monthly cadence appends a one-time
+    setup-fee Price as a second line item. Per D-10: Stripe Tax is enabled.
+    Per T-13-05-05: idempotency_key bound to the saga ``run_id``.
+
+    Side effect (D-17): inserts a ``provisioning_runs`` row keyed on the new
+    ``run_id`` with ``status='pending'`` and the ``stripe_session_id``. The
+    ``checkout.session.completed`` webhook (Plan 13-01) flips it to
+    ``running`` and the saga (Plan 13-06) advances from there.
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # 1. Look up the physician's authoritative country + email.
+    try:
+        physician_result = (
+            db.table("physicians")
+            .select("country, email")
+            .eq("id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "upgrade_checkout: physician lookup failed physician_id=%s",
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=500, detail="Unable to load physician record.")
+
+    if not physician_result.data:
+        raise HTTPException(status_code=404, detail="Physician record not found.")
+
+    physician_row = physician_result.data[0]
+    physician_country = (physician_row.get("country") or "").upper().strip()
+    physician_email = physician_row.get("email") or auth.email
+
+    # 2. Look up an existing stripe_customer_id (None on first upgrade).
+    stripe_customer_id: Optional[str] = None
+    try:
+        workspace_result = (
+            db.table("physician_workspace_accounts")
+            .select("stripe_customer_id")
+            .eq("physician_id", auth.physician_id)
+            .limit(1)
+            .execute()
+        )
+        if workspace_result.data:
+            stripe_customer_id = workspace_result.data[0].get("stripe_customer_id")
+    except Exception:
+        logger.warning(
+            "upgrade_checkout: workspace account lookup failed physician_id=%s "
+            "(continuing without customer_id)",
+            auth.physician_id,
+        )
+
+    # 3. Build the Stripe Checkout Session (SAT gate is the first body line).
+    try:
+        result = await create_checkout_session(
+            physician_id=auth.physician_id,
+            physician_country=physician_country,
+            physician_email=physician_email,
+            tld_class=body.tld_class,
+            cadence=body.cadence,
+            domain=body.domain,
+            stripe_customer_id=stripe_customer_id,
+        )
+    except SATBlockedError:
+        # D-22 — bilingual envelope per T-13-05-07 (no Stripe IDs/stack traces).
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "SAT_BLOCKED",
+                "message_en": "Práctikah Pro is launching in México soon",
+                "message_es": "Práctikah Pro estará disponible en México pronto",
+            },
+        )
+    except CountryNotSupportedError:
+        # D-23 — bilingual envelope.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "COUNTRY_NOT_SUPPORTED",
+                "message_en": "Práctikah Pro isn't available in your country yet",
+                "message_es": "Práctikah Pro aún no está disponible en tu país",
+            },
+        )
+    except RuntimeError as err:
+        # Stripe price lookup miss / Stripe API failure / missing secret.
+        logger.exception(
+            "upgrade_checkout: RuntimeError physician_id=%s",
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=503, detail=str(err))
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    except Exception:
+        logger.exception(
+            "upgrade_checkout: unhandled error physician_id=%s",
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=502, detail="Stripe Checkout creation failed.")
+
+    # 4. D-17 — persist the saga run BEFORE returning the URL so a successful
+    # webhook can correlate by run_id even if the doctor force-quits the tab.
+    try:
+        db.table("provisioning_runs").insert(
+            {
+                "physician_id": auth.physician_id,
+                "run_id": result["run_id"],
+                "saga_type": "pro_upgrade",
+                "status": "pending",
+                "stripe_session_id": result["session_id"],
+                "domain_name": body.domain,
+            }
+        ).execute()
+    except Exception:
+        # Best-effort — the webhook can fall back to inserting on receipt.
+        logger.exception(
+            "upgrade_checkout: provisioning_runs insert failed physician_id=%s "
+            "run_id=%s session_id=%s (webhook will reconcile)",
+            auth.physician_id, result["run_id"], result["session_id"],
+        )
+
+    # 5. Persist the customer_id placeholder so future Customer Portal lookups
+    # succeed even if the doctor never returns from Checkout. Stripe will
+    # populate the real ID via the webhook event; this is just a marker that
+    # a session exists.
+    try:
+        db.table("physician_workspace_accounts").upsert(
+            {
+                "physician_id": auth.physician_id,
+                "stripe_session_id": result["session_id"],
+            },
+            on_conflict="physician_id",
+        ).execute()
+    except Exception:
+        # The column may not exist on older deployments — non-fatal.
+        logger.warning(
+            "upgrade_checkout: workspace stripe_session_id update failed "
+            "physician_id=%s (non-fatal)",
+            auth.physician_id,
+        )
+
+    return CheckoutResponse(
+        checkout_url=result["url"],
+        session_id=result["session_id"],
+    )
