@@ -184,47 +184,161 @@ def _epoch_to_iso(value: Any) -> Optional[str]:
 # Event dispatchers
 # ---------------------------------------------------------------------------
 
+def _generate_mailbox_password(length: int = 24) -> str:
+    """Generate a high-entropy mailbox password.
+
+    Uses ``secrets.token_urlsafe`` for cryptographically strong randomness
+    (T-13-06-09). The returned password is handed to the saga and ultimately
+    delivered to the doctor via the Pro welcome email (Plan 13-09); it is
+    NEVER logged here or in the saga.
+    """
+    import secrets
+    # token_urlsafe(24) returns ~32 url-safe chars; trim/pad to caller's len.
+    raw = secrets.token_urlsafe(max(16, length))
+    return raw[:length] if length > 0 else raw
+
+
 async def _on_checkout_session_completed(event: dict[str, Any], db: Any) -> dict[str, Any]:
-    """Trigger the pro_upgrade saga when checkout.session.completed lands.
+    """Persist Stripe identifiers + tier='pro' (D-13), then trigger the saga.
 
-    Stub today — wired to ``services.practikah.orchestrator.start_pro_upgrade_saga``
-    in Plan 13-06. The webhook persists the customer/subscription IDs so the
-    saga can pick up from a known-good state.
+    Per D-13 this webhook handler is the SOLE writer to subscription state on
+    ``physician_workspace_accounts`` (``tier``, ``subscription_status``,
+    ``stripe_customer_id``, ``stripe_subscription_id``). The saga writes ONLY
+    to ``physician_domains`` and ``physician_website.published_to_domain_id``.
 
-    Per D-13 the webhook (this function) is the sole writer of
-    stripe_customer_id/stripe_subscription_id on physician_workspace_accounts.
+    The Pro upgrade saga is fire-and-forget (``asyncio.create_task``); the
+    webhook returns 200 immediately so Stripe's 30-second timeout is never
+    blocked by domain registration latency.
     """
     obj = event["data"]["object"]
     physician_id = _physician_id_from_metadata(obj)
     customer_id = obj.get("customer")
     subscription_id = obj.get("subscription")
+    metadata = obj.get("metadata") or {}
 
     if not physician_id:
         physician_id = _physician_id_by_customer(db, customer_id)
 
+    # D-13: webhook handler is the SOLE writer of subscription state.
     if physician_id:
         try:
-            db.table("physician_workspace_accounts").update(
+            db.table("physician_workspace_accounts").upsert(
                 {
+                    "physician_id": physician_id,
                     "stripe_customer_id": customer_id,
                     "stripe_subscription_id": subscription_id,
-                }
-            ).eq("physician_id", physician_id).execute()
+                    "tier": "pro",
+                    "subscription_status": "active",
+                },
+                on_conflict="physician_id",
+            ).execute()
         except Exception:
             logger.exception(
                 "[stripe_webhook] checkout.session.completed: failed to persist "
-                "stripe IDs for physician_id=%s", physician_id,
+                "stripe IDs/tier for physician_id=%s", physician_id,
             )
 
-    # TODO(13-06): start the pro_upgrade saga here.
-    # from services.practikah.orchestrator import start_pro_upgrade_saga
-    # await start_pro_upgrade_saga(physician_id=physician_id, session=obj)
+    # Trigger the 7-step Pro upgrade saga as a background task per D-14 / WSPC-09.
+    # All required parameters are pulled from the session metadata established
+    # by 13-05's create_checkout_session.
+    domain = metadata.get("domain") or ""
+    tld_class = metadata.get("tld_class") or ""
+    cadence = metadata.get("cadence") or ""
+    run_id = metadata.get("run_id") or ""
+    local_part = (
+        metadata.get("local_part")
+        or (obj.get("custom_fields") or [{}])[0].get("text", {}).get("value") if isinstance(obj.get("custom_fields"), list) else None
+    ) or _default_local_part(physician_id)
+
+    if not (physician_id and run_id and domain):
+        logger.warning(
+            "[stripe_webhook] checkout.session.completed missing saga prerequisites "
+            "physician_id=%s run_id=%s domain=%s — saga NOT dispatched",
+            physician_id, run_id, domain,
+        )
+        return {
+            "dispatched": "checkout.session.completed",
+            "physician_id": physician_id,
+            "subscription_id": subscription_id,
+            "saga_dispatched": False,
+        }
+
+    try:
+        # Imported inside the dispatcher so module import doesn't pull in the
+        # full saga dependency chain unless the webhook actually fires.
+        import asyncio as _asyncio
+        from services.practikah.pro_saga import provision_pro_upgrade
+        _asyncio.create_task(
+            provision_pro_upgrade(
+                db=db,
+                physician_id=physician_id,
+                run_id=run_id,
+                domain=domain,
+                tld_class=tld_class,
+                cadence=cadence,
+                local_part=local_part,
+                mailbox_password=_generate_mailbox_password(),
+                physician_registrant=_physician_registrant_for(db, physician_id),
+                stripe_session_id=obj.get("id") or "",
+            )
+        )
+        saga_dispatched = True
+    except Exception:
+        logger.exception(
+            "[stripe_webhook] failed to dispatch pro_upgrade saga "
+            "physician_id=%s run_id=%s", physician_id, run_id,
+        )
+        saga_dispatched = False
 
     return {
         "dispatched": "checkout.session.completed",
         "physician_id": physician_id,
         "subscription_id": subscription_id,
+        "saga_dispatched": saga_dispatched,
     }
+
+
+def _default_local_part(physician_id: Optional[str]) -> str:
+    """Fallback local_part when checkout metadata didn't include one.
+
+    13-05's create_checkout_session may carry the local_part chosen at the
+    review step. If the doctor never reached that step (or used a Stripe-CLI
+    test trigger), we fall back to ``dr-<short_id>`` so the saga still has a
+    valid value. Plan 13-09 lets the doctor rename the alias post-provision.
+    """
+    if physician_id and len(physician_id) >= 8:
+        return f"dr-{physician_id[:8]}"
+    return "dr-default"
+
+
+def _physician_registrant_for(db: Any, physician_id: Optional[str]) -> dict[str, Any]:
+    """Read the WHOIS-privacy-safe registrant contact off the physicians row.
+
+    Per T-13-06-08 the registrant is sourced from the verified physician
+    profile, NOT from Stripe metadata (avoids spoofing).
+    """
+    if not physician_id:
+        return {}
+    try:
+        result = (
+            db.table("physicians")
+            .select("full_name, email")
+            .eq("id", physician_id)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            row = result.data[0]
+            return {
+                "name": row.get("full_name", ""),
+                "email": row.get("email", ""),
+            }
+    except Exception:
+        logger.exception(
+            "[stripe_webhook] _physician_registrant_for failed physician_id=%s",
+            physician_id,
+        )
+    return {}
 
 
 async def _on_invoice_payment_succeeded(event: dict[str, Any], db: Any) -> dict[str, Any]:
