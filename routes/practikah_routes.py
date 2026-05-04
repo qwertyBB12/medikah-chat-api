@@ -24,6 +24,7 @@ from typing import Any, List, Literal, Optional, Set
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -36,6 +37,7 @@ from services.practikah.orchestrator import (
     provision_workspace,
 )
 from services.practikah.audit import ProvisioningLogWriter
+from services.practikah.sse_status import stream_run_status
 from services.practikah.availability import check_availability as upgrade_check_availability
 from services.practikah.checkout import create_checkout_session
 from services.practikah.sat_compliance_gate import (
@@ -1868,3 +1870,120 @@ async def upgrade_checkout(
         checkout_url=result["url"],
         session_id=result["session_id"],
     )
+
+
+# ---------------------------------------------------------------------------
+# SSE: Pro upgrade saga live status (Phase 13-07 / D-16)
+# ---------------------------------------------------------------------------
+
+@router.get("/upgrade/status")
+async def upgrade_status_sse(
+    request: Request,
+    run_id: str,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+):
+    """Server-Sent Events stream of saga step transitions for the doctor's
+    Vercel-deploy-style stepped checklist UI (D-16, 3-min live UX).
+
+    Owner-only authorization (T-13-07-01): the run must belong to the
+    authenticated physician. We re-check on every connection open — RLS
+    provides defense-in-depth on the SELECT, but explicit 403 here is the
+    canonical security gate.
+
+    No SlowAPI rate limit on this endpoint — it's a long-lived connection,
+    not a request-per-call surface. Concurrency is naturally bounded: one
+    saga per upgrade flow per physician (T-13-07-03).
+
+    Per D-15: stream emits ``run.partial_finish_later`` and closes when the
+    saga lands in finish-later state (post-POR retry); the UI shows a warm
+    bilingual "we're finishing setup, your domain is yours" message.
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    # Owner-only auth gate (T-13-07-01) — runs BEFORE the stream opens.
+    try:
+        run_resp = (
+            db.table("provisioning_runs")
+            .select("physician_id")
+            .eq("run_id", run_id)
+            .single()
+            .execute()
+        )
+        run = run_resp.data
+    except Exception:
+        logger.exception(
+            "upgrade_status_sse: provisioning_runs lookup failed run_id=%s "
+            "physician_id=%s",
+            run_id,
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=404, detail="run not found")
+
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    if run.get("physician_id") != auth.physician_id:
+        # Distinct 403 (not 404) — caller is authenticated but not the owner.
+        raise HTTPException(status_code=403, detail="not your run")
+
+    return StreamingResponse(
+        stream_run_status(db, run_id, auth.physician_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            # Defeats Netlify edge buffering and nginx ``proxy_buffering``. (D-16)
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper: resolve run_id from a Stripe Checkout session_id (Phase 13-07)
+# ---------------------------------------------------------------------------
+
+class RunBySessionResponse(BaseModel):
+    run_id: str
+
+
+@router.get("/upgrade/run-by-session", response_model=RunBySessionResponse)
+@limiter.limit("30/minute")
+async def upgrade_run_by_session(
+    request: Request,
+    session_id: str,
+    auth: AuthenticatedPhysician = Depends(verified_physician),
+) -> RunBySessionResponse:
+    """Map a Stripe Checkout ``session_id`` back to its saga ``run_id``.
+
+    The doctor returns from Stripe with ``?session_id=cs_test_…`` in the
+    URL but the SSE stream is keyed on ``run_id``. This endpoint owner-gates
+    the lookup so a physician can never resolve another physician's run_id.
+    """
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    try:
+        resp = (
+            db.table("provisioning_runs")
+            .select("run_id")
+            .eq("stripe_session_id", session_id)
+            .eq("physician_id", auth.physician_id)
+            .single()
+            .execute()
+        )
+        row = resp.data
+    except Exception:
+        logger.exception(
+            "upgrade_run_by_session: lookup failed session_id=%s physician_id=%s",
+            session_id,
+            auth.physician_id,
+        )
+        raise HTTPException(status_code=404, detail="run not found")
+
+    if not row:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    return RunBySessionResponse(run_id=str(row["run_id"]))
