@@ -16,6 +16,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from services import email_chrome
 from services.appointments import SecureAppointmentStore
 from services.conversation_state import (
     ConversationStage,
@@ -361,90 +362,90 @@ async def _perform_scheduling(
         "Warmly,\n"
         "The Medikah Care Team\n"
     )
+    _ec_locale = (req.locale_preference or "en").lower()
+    if _ec_locale not in ("en", "es"):
+        _ec_locale = "en"
+    _ec_head = email_chrome.email_head()
+    _ec_header = email_chrome.email_header("navy", _ec_locale, "medikah")  # type: ignore[arg-type]
+    _ec_footer = email_chrome.email_footer(_ec_locale)  # type: ignore[arg-type]
+    _ec_C = email_chrome.TOKENS["colors"]
+    _ec_F = email_chrome.TOKENS["fonts"]
+    _ec_R = email_chrome.TOKENS["radii"]
+    _ec_BG = email_chrome.TOKENS["pageBg"]
     patient_html_body = f"""\
 <!DOCTYPE html>
-<html>
-<head>
-  <meta name="color-scheme" content="light">
-  <meta name="supported-color-schemes" content="light">
-</head>
-<body style="margin: 0; padding: 0; background-color: #FAFAFB;">
-<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #FFFFFF; border-radius: 12px; overflow: hidden;">
-  <!-- Header - light design with blue accent bar -->
-  <div style="background-color: #FFFFFF; padding: 0; text-align: center; border-bottom: 4px solid #1B2A41;">
-    <div style="padding: 32px 48px;">
-      <p style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 32px; font-weight: 800; color: #1B2A41; letter-spacing: -0.01em; margin: 0;">medikah</p>
-      <p style="font-size: 13px; color: #2C7A8C; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin: 12px 0 0 0;">Visit Confirmed</p>
-    </div>
-  </div>
+<html lang="{_ec_locale}">
+{_ec_head}
+<body style="margin:0;padding:0;background-color:{_ec_BG};font-family:{_ec_F['body']};color:{_ec_C['bodySlate']};">
+{_ec_header}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:{_ec_BG};padding:40px 20px;">
+  <tr><td align="center">
+    <table role="presentation" class="email-container" width="600" cellpadding="0" cellspacing="0" style="background-color:{_ec_C['white']};border-radius:{_ec_R['md']};overflow:hidden;">
+      <tr>
+        <td class="email-pad" style="padding:40px 48px 0 48px;">
+          <p style="font-family:{_ec_F['ui']};font-size:13px;color:{_ec_C['clinicalTeal']};font-weight:600;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px 0;">Visit Confirmed</p>
+          <p style="font-family:{_ec_F['body']};font-size:20px;font-weight:600;line-height:1.4;color:{_ec_C['deepCharcoal']};margin:0 0 24px 0;">Hi {req.patient_name},</p>
+          <p style="font-family:{_ec_F['ui']};font-size:16px;line-height:1.7;color:{_ec_C['bodySlate']};margin:0 0 24px 0;">
+            Great news — your Medikah visit is confirmed. Here are your appointment details:
+          </p>
+        </td>
+      </tr>
 
-  <div style="padding: 48px; background: #FFFFFF;">
-    <p style="font-size: 20px; font-weight: 600; line-height: 1.4; color: #1B2A41; margin: 0 0 24px 0;">Hi {req.patient_name},</p>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 28px 48px;">
+          <div style="background-color:{_ec_C['linen']};border-left:4px solid {_ec_C['instBlue']};padding:24px;border-radius:{_ec_R['sm']};">
+            <table role="presentation" style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td style="font-family:{_ec_F['ui']};padding:10px 0;color:{_ec_C['bodySlate']};font-size:12px;text-transform:uppercase;letter-spacing:0.05em;width:110px;font-weight:600;">Doctor</td>
+                <td style="font-family:{_ec_F['ui']};padding:10px 0;color:{_ec_C['instBlue']};font-size:16px;font-weight:700;">{assigned_doctor}</td>
+              </tr>
+              <tr>
+                <td style="font-family:{_ec_F['ui']};padding:10px 0;color:{_ec_C['bodySlate']};font-size:12px;text-transform:uppercase;letter-spacing:0.05em;font-weight:600;">Date &amp; Time</td>
+                <td style="font-family:{_ec_F['ui']};padding:10px 0;color:{_ec_C['instBlue']};font-size:16px;font-weight:700;">{time_display}</td>
+              </tr>
+            </table>
+          </div>
+        </td>
+      </tr>
 
-    <p style="font-size: 16px; line-height: 1.7; color: #4A5568; margin: 0 0 24px 0;">
-      Great news — your Medikah visit is confirmed. Here are your appointment details:
-    </p>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 28px 48px;text-align:center;">
+          <a href="{doxy_link}" style="display:inline-block;background-color:{_ec_C['instBlue']};color:{_ec_C['white']};font-family:{_ec_F['ui']};text-decoration:none;padding:16px 40px;border-radius:{_ec_R['sm']};font-size:16px;font-weight:700;letter-spacing:0.02em;">Join Your Visit</a>
+        </td>
+      </tr>
 
-    <div style="background: linear-gradient(135deg, #F8FAFB 0%, #F0F4F5 100%); border-left: 4px solid #1B2A41; padding: 24px; margin: 0 0 28px 0; border-radius: 0 8px 8px 0;">
-      <table style="width: 100%; border-collapse: collapse;">
-        <tr>
-          <td style="padding: 10px 0; color: #6B7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; width: 110px; font-weight: 600;">Doctor</td>
-          <td style="padding: 10px 0; color: #1B2A41; font-size: 16px; font-weight: 700;">{assigned_doctor}</td>
-        </tr>
-        <tr>
-          <td style="padding: 10px 0; color: #6B7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">Date &amp; Time</td>
-          <td style="padding: 10px 0; color: #1B2A41; font-size: 16px; font-weight: 700;">{time_display}</td>
-        </tr>
-      </table>
-    </div>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 28px 48px;">
+          <p style="font-family:{_ec_F['ui']};font-size:13px;line-height:1.6;color:{_ec_C['bodySlate']};text-align:center;margin:0 0 24px 0;">
+            We've attached a calendar invite — open it to add this appointment to your calendar automatically.
+          </p>
+          <div style="border-top:1px solid {_ec_C['borderLine']};padding-top:24px;">
+            <p style="font-family:{_ec_F['body']};font-size:14px;font-weight:700;color:{_ec_C['instBlue']};margin:0 0 12px 0;">Before your visit:</p>
+            <ul style="font-family:{_ec_F['ui']};font-size:14px;line-height:1.8;color:{_ec_C['bodySlate']};padding-left:20px;margin:0;">
+              <li>No downloads needed — just click the link when it's time</li>
+              <li>Find a quiet, private spot with a good connection</li>
+              <li>Have any medications or health records handy</li>
+            </ul>
+          </div>
+        </td>
+      </tr>
 
-    <div style="text-align: center; margin: 0 0 28px 0;">
-      <a href="{doxy_link}" style="display: inline-block; background: #1B2A41; color: #FFFFFF; text-decoration: none; padding: 18px 40px; border-radius: 8px; font-size: 16px; font-weight: 700; letter-spacing: 0.02em; box-shadow: 0 4px 12px rgba(27,42,65,0.25);">Join Your Visit</a>
-    </div>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 32px 48px;border-top:1px solid {_ec_C['borderLine']};">
+          <p style="font-family:{_ec_F['ui']};font-size:14px;line-height:1.6;color:{_ec_C['bodySlate']};margin:24px 0 16px 0;">
+            Need to reschedule or have questions? Simply reply to this email — our care team is here for you.
+          </p>
+          <p style="font-family:{_ec_F['ui']};font-size:15px;color:{_ec_C['bodySlate']};line-height:1.6;font-style:italic;margin:16px 0 8px 0;">
+            Care Without Distance.<br/>Healthcare coordination across the Americas.
+          </p>
+          <p style="font-family:{_ec_F['body']};font-size:16px;font-weight:700;color:{_ec_C['instBlue']};margin:0;">— Medikah Care Team</p>
+        </td>
+      </tr>
 
-    <p style="font-size: 13px; line-height: 1.6; color: #6B7280; text-align: center; margin: 0 0 28px 0;">
-      We've attached a calendar invite — open it to add this appointment to your calendar automatically.
-    </p>
-
-    <div style="border-top: 2px solid #F0F4F5; padding-top: 24px; margin-top: 24px;">
-      <p style="font-size: 14px; font-weight: 700; color: #1B2A41; margin: 0 0 12px 0;">Before your visit:</p>
-      <ul style="font-size: 14px; line-height: 1.8; color: #4A5568; padding-left: 20px; margin: 0;">
-        <li>No downloads needed — just click the link when it's time</li>
-        <li>Find a quiet, private spot with a good connection</li>
-        <li>Have any medications or health records handy</li>
-      </ul>
-    </div>
-
-    <p style="font-size: 14px; line-height: 1.6; color: #4A5568; margin: 24px 0 0 0;">
-      Need to reschedule or have questions? Simply reply to this email — our care team is here for you.
-    </p>
-
-    <div style="margin-top: 32px; padding-top: 24px; border-top: 2px solid #F0F4F5;">
-      <p style="font-size: 15px; color: #6B7280; line-height: 1.6; font-style: italic; margin: 0 0 8px 0;">
-        Healthcare coordination that crosses borders.<br/>Care that never does.
-      </p>
-      <p style="font-size: 16px; font-weight: 700; color: #1B2A41; margin: 0;">— Medikah Care Team</p>
-    </div>
-  </div>
-
-  <!-- Footer - light with blue accent -->
-  <div style="background-color: #F5F7F8; padding: 28px 48px; text-align: center; border-top: 4px solid #1B2A41;">
-    <p style="font-size: 12px; line-height: 1.6; color: #6B7280; margin: 0 0 12px 0;">
-      Your conversations are encrypted and handled with care.<br/>
-      Licensed professionals may review when needed to ensure safe guidance.
-    </p>
-    <p style="font-size: 12px; line-height: 1.6; color: #9CA3AF; margin: 0 0 16px 0;">
-      Medikah Corporation · Incorporated in Delaware, USA
-    </p>
-    <p style="font-size: 12px; margin: 0;">
-      <a href="https://medikah.health/privacy" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Privacy Policy</a>
-      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="https://medikah.health/terms" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Terms of Service</a>
-      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="mailto:hello@medikah.health" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Contact</a>
-    </p>
-  </div>
-</div>
+    </table>
+  </td></tr>
+</table>
+{_ec_footer}
 </body>
 </html>"""
 

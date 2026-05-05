@@ -7,9 +7,21 @@ import logging
 import os
 from typing import Optional
 
+from services.email_chrome import (
+    TOKENS,
+    email_footer,
+    email_head,
+    email_header,
+)
 from services.notifications import NotificationMessage, NotificationService
 
 logger = logging.getLogger(__name__)
+
+# Locked-token shorthand (mirror of frontend tokens.ts).
+_C = TOKENS["colors"]
+_F = TOKENS["fonts"]
+_R = TOKENS["radii"]
+_PAGE_BG = TOKENS["pageBg"]
 
 # Base URL for dashboard links in emails
 _BASE_URL = os.getenv("NEXT_PUBLIC_BASE_URL", "https://medikah.health")
@@ -47,7 +59,7 @@ def _build_welcome_html(physician_data: dict, locale: str = "en") -> str:
         )
         sign_off = "Cordialmente,"
         team_name = "El equipo de Medikah"
-        tagline = "Coordinacion medica que cruza fronteras.<br/>El cuidado, nunca."
+        tagline = "Cuidado Sin Distancia.<br/>Coordinacion medica unida a traves de las Americas."
     else:
         subject_line = "Welcome to the Medikah physician network"
         greeting = f"Dear Dr. {name},"
@@ -76,94 +88,87 @@ def _build_welcome_html(physician_data: dict, locale: str = "en") -> str:
         sign_off = "Warmly,"
         team_name = "The Medikah Team"
         tagline = (
-            "Healthcare coordination that crosses borders.<br/>Care that never does."
+            "Care Without Distance.<br/>Healthcare coordination across the Americas."
         )
 
     next_steps_html = "".join(
         f'<li style="margin-bottom: 8px;">{step}</li>' for step in next_steps
     )
 
+    head = email_head()
+    header = email_header("navy", locale, "medikah")
+    footer = email_footer(locale)
     return f"""\
 <!DOCTYPE html>
-<html>
-<head>
-  <meta name="color-scheme" content="light">
-  <meta name="supported-color-schemes" content="light">
-</head>
-<body style="margin: 0; padding: 0; background-color: #FAFAFB;">
-<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #FFFFFF; border-radius: 12px; overflow: hidden;">
-  <!-- Header -->
-  <div style="background-color: #FFFFFF; padding: 0; text-align: center; border-bottom: 4px solid #1B2A41;">
-    <div style="padding: 32px 48px;">
-      <p style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 32px; font-weight: 800; color: #1B2A41; letter-spacing: -0.01em; margin: 0;">medikah</p>
-      <p style="font-size: 13px; color: #2C7A8C; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin: 12px 0 0 0;">{subject_line}</p>
-    </div>
-  </div>
-
-  <div style="padding: 48px; background: #FFFFFF;">
-    <p style="font-size: 20px; font-weight: 600; line-height: 1.4; color: #1B2A41; margin: 0 0 24px 0;">{greeting}</p>
-
-    <p style="font-size: 16px; line-height: 1.7; color: #4A5568; margin: 0 0 28px 0;">
-      {intro}
-    </p>
-
-    <!-- Status box -->
-    <div style="background: linear-gradient(135deg, #F8FAFB 0%, #F0F4F5 100%); border-left: 4px solid #1B2A41; padding: 24px; margin: 0 0 28px 0; border-radius: 0 8px 8px 0;">
-      <table style="width: 100%; border-collapse: collapse;">
+<html lang="{locale}">
+{head}
+<body style="margin:0;padding:0;background-color:{_PAGE_BG};font-family:{_F['body']};color:{_C['bodySlate']};">
+{header}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:{_PAGE_BG};padding:40px 20px;">
+  <tr>
+    <td align="center">
+      <table role="presentation" class="email-container" width="600" cellpadding="0" cellspacing="0" style="background-color:{_C['white']};border-radius:{_R['md']};overflow:hidden;">
         <tr>
-          <td style="padding: 10px 0; color: #6B7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; width: 140px; font-weight: 600;">{status_title}</td>
-          <td style="padding: 10px 0; color: #2C7A8C; font-size: 16px; font-weight: 700;">{status_text}</td>
+          <td class="email-pad" style="padding:40px 48px 0 48px;">
+            <p style="font-family:{_F['ui']};font-size:13px;color:{_C['clinicalTeal']};font-weight:600;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px 0;">{subject_line}</p>
+            <p style="font-family:{_F['body']};font-size:20px;font-weight:600;line-height:1.4;color:{_C['deepCharcoal']};margin:0 0 24px 0;">{greeting}</p>
+            <p style="font-family:{_F['ui']};font-size:16px;line-height:1.7;color:{_C['bodySlate']};margin:0 0 28px 0;">
+              {intro}
+            </p>
+          </td>
         </tr>
+
+        <tr>
+          <td class="email-pad" style="padding:0 48px 28px 48px;">
+            <div style="background-color:{_C['linen']};border-left:4px solid {_C['instBlue']};padding:24px;border-radius:{_R['sm']};">
+              <table role="presentation" style="width:100%;border-collapse:collapse;">
+                <tr>
+                  <td style="font-family:{_F['ui']};padding:10px 0;color:{_C['bodySlate']};font-size:12px;text-transform:uppercase;letter-spacing:0.05em;width:140px;font-weight:600;">{status_title}</td>
+                  <td style="font-family:{_F['ui']};padding:10px 0;color:{_C['clinicalTeal']};font-size:16px;font-weight:700;">{status_text}</td>
+                </tr>
+              </table>
+              <p style="font-family:{_F['ui']};font-size:14px;line-height:1.6;color:{_C['bodySlate']};margin:12px 0 0 0;">
+                {status_detail}
+              </p>
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td class="email-pad" style="padding:0 48px 28px 48px;">
+            <p style="font-family:{_F['body']};font-size:14px;font-weight:700;color:{_C['instBlue']};margin:0 0 12px 0;">{next_steps_title}</p>
+            <ol style="font-family:{_F['ui']};font-size:14px;line-height:1.8;color:{_C['bodySlate']};padding-left:20px;margin:0;">
+              {next_steps_html}
+            </ol>
+          </td>
+        </tr>
+
+        <tr>
+          <td class="email-pad" style="padding:0 48px 28px 48px;text-align:center;">
+            <a href="{dashboard_url}" style="display:inline-block;background-color:{_C['clinicalTeal']};color:{_C['white']};font-family:{_F['ui']};text-decoration:none;padding:16px 40px;border-radius:{_R['sm']};font-size:16px;font-weight:700;letter-spacing:0.02em;">{cta_text}</a>
+          </td>
+        </tr>
+
+        <tr>
+          <td class="email-pad" style="padding:0 48px 32px 48px;">
+            <p style="font-family:{_F['ui']};font-size:14px;line-height:1.6;color:{_C['bodySlate']};margin:0 0 24px 0;">
+              {support_text}
+            </p>
+            <div style="margin-top:8px;padding-top:24px;border-top:1px solid {_C['borderLine']};">
+              <p style="font-family:{_F['ui']};font-size:15px;color:{_C['bodySlate']};line-height:1.6;font-style:italic;margin:0 0 8px 0;">
+                {tagline}
+              </p>
+              <p style="font-family:{_F['ui']};font-size:14px;color:{_C['bodySlate']};margin:0 0 4px 0;">{sign_off}</p>
+              <p style="font-family:{_F['body']};font-size:16px;font-weight:700;color:{_C['instBlue']};margin:0;">{team_name}</p>
+            </div>
+          </td>
+        </tr>
+
       </table>
-      <p style="font-size: 14px; line-height: 1.6; color: #4A5568; margin: 12px 0 0 0;">
-        {status_detail}
-      </p>
-    </div>
-
-    <!-- Next steps -->
-    <div style="margin: 0 0 28px 0;">
-      <p style="font-size: 14px; font-weight: 700; color: #1B2A41; margin: 0 0 12px 0;">{next_steps_title}</p>
-      <ol style="font-size: 14px; line-height: 1.8; color: #4A5568; padding-left: 20px; margin: 0;">
-        {next_steps_html}
-      </ol>
-    </div>
-
-    <!-- CTA button -->
-    <div style="text-align: center; margin: 0 0 28px 0;">
-      <a href="{dashboard_url}" style="display: inline-block; background: #2C7A8C; color: #FFFFFF; text-decoration: none; padding: 18px 40px; border-radius: 8px; font-size: 16px; font-weight: 700; letter-spacing: 0.02em; box-shadow: 0 4px 12px rgba(44,122,140,0.25);">{cta_text}</a>
-    </div>
-
-    <p style="font-size: 14px; line-height: 1.6; color: #4A5568; margin: 0 0 24px 0;">
-      {support_text}
-    </p>
-
-    <div style="margin-top: 32px; padding-top: 24px; border-top: 2px solid #F0F4F5;">
-      <p style="font-size: 15px; color: #6B7280; line-height: 1.6; font-style: italic; margin: 0 0 8px 0;">
-        {tagline}
-      </p>
-      <p style="font-size: 14px; color: #4A5568; margin: 0 0 4px 0;">{sign_off}</p>
-      <p style="font-size: 16px; font-weight: 700; color: #1B2A41; margin: 0;">{team_name}</p>
-    </div>
-  </div>
-
-  <!-- Footer -->
-  <div style="background-color: #F5F7F8; padding: 28px 48px; text-align: center; border-top: 4px solid #1B2A41;">
-    <p style="font-size: 12px; line-height: 1.6; color: #6B7280; margin: 0 0 12px 0;">
-      Your information is handled with care and stored securely.<br/>
-      Our team reviews credentials to ensure safe, quality care.
-    </p>
-    <p style="font-size: 12px; line-height: 1.6; color: #9CA3AF; margin: 0 0 16px 0;">
-      Medikah Corporation &middot; Incorporated in Delaware, USA
-    </p>
-    <p style="font-size: 12px; margin: 0;">
-      <a href="https://medikah.health/privacy" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Privacy Policy</a>
-      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="https://medikah.health/terms" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Terms of Service</a>
-      <span style="color: #D1D5DB; margin: 0 8px;">|</span>
-      <a href="mailto:hello@medikah.health" style="color: #1B2A41; text-decoration: none; font-weight: 600;">Contact</a>
-    </p>
-  </div>
-</div>
+    </td>
+  </tr>
+</table>
+{footer}
 </body>
 </html>"""
 
@@ -292,37 +297,46 @@ async def send_inquiry_accepted_email(
         f'<li style="margin-bottom: 8px;">{item}</li>' for item in next_items
     )
 
+    head = email_head()
+    header = email_header("navy", locale, "medikah")
+    footer = email_footer(locale)
     html_body = f"""\
 <!DOCTYPE html>
-<html>
-<head><meta name="color-scheme" content="light"></head>
-<body style="margin: 0; padding: 0; background-color: #FAFAFB;">
-<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #FFFFFF; border-radius: 12px; overflow: hidden;">
-  <div style="background-color: #FFFFFF; text-align: center; border-bottom: 4px solid #1B2A41;">
-    <div style="padding: 32px 48px;">
-      <p style="font-size: 32px; font-weight: 800; color: #1B2A41; margin: 0;">medikah</p>
-      <p style="font-size: 13px; color: #2C7A8C; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin: 12px 0 0 0;">{header_text}</p>
-    </div>
-  </div>
-  <div style="padding: 48px; background: #FFFFFF;">
-    <p style="font-size: 20px; font-weight: 600; color: #1B2A41; margin: 0 0 24px 0;">{greeting}</p>
-    <p style="font-size: 16px; line-height: 1.7; color: #4A5568; margin: 0 0 28px 0;">{intro}</p>
-    <div style="margin: 0 0 28px 0;">
-      <p style="font-size: 14px; font-weight: 700; color: #1B2A41; margin: 0 0 12px 0;">{next_title}</p>
-      <ul style="font-size: 14px; line-height: 1.8; color: #4A5568; padding-left: 20px; margin: 0;">{next_items_html}</ul>
-    </div>
-    <div style="text-align: center; margin: 0 0 28px 0;">
-      <a href="{dashboard_url}" style="display: inline-block; background: #2C7A8C; color: #FFFFFF; text-decoration: none; padding: 18px 40px; border-radius: 8px; font-size: 16px; font-weight: 700;">{cta_text}</a>
-    </div>
-    <div style="margin-top: 32px; padding-top: 24px; border-top: 2px solid #F0F4F5;">
-      <p style="font-size: 14px; color: #4A5568; margin: 0 0 4px 0;">{sign_off}</p>
-      <p style="font-size: 16px; font-weight: 700; color: #1B2A41; margin: 0;">{team_name}</p>
-    </div>
-  </div>
-  <div style="background-color: #F5F7F8; padding: 28px 48px; text-align: center; border-top: 4px solid #1B2A41;">
-    <p style="font-size: 12px; color: #9CA3AF; margin: 0;">Medikah Corporation &middot; Incorporated in Delaware, USA</p>
-  </div>
-</div>
+<html lang="{locale}">
+{head}
+<body style="margin:0;padding:0;background-color:{_PAGE_BG};font-family:{_F['body']};color:{_C['bodySlate']};">
+{header}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:{_PAGE_BG};padding:40px 20px;">
+  <tr><td align="center">
+    <table role="presentation" class="email-container" width="600" cellpadding="0" cellspacing="0" style="background-color:{_C['white']};border-radius:{_R['md']};overflow:hidden;">
+      <tr>
+        <td class="email-pad" style="padding:40px 48px 0 48px;">
+          <p style="font-family:{_F['ui']};font-size:13px;color:{_C['clinicalTeal']};font-weight:600;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px 0;">{header_text}</p>
+          <p style="font-family:{_F['body']};font-size:20px;font-weight:600;color:{_C['deepCharcoal']};margin:0 0 24px 0;">{greeting}</p>
+          <p style="font-family:{_F['ui']};font-size:16px;line-height:1.7;color:{_C['bodySlate']};margin:0 0 28px 0;">{intro}</p>
+        </td>
+      </tr>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 28px 48px;">
+          <p style="font-family:{_F['body']};font-size:14px;font-weight:700;color:{_C['instBlue']};margin:0 0 12px 0;">{next_title}</p>
+          <ul style="font-family:{_F['ui']};font-size:14px;line-height:1.8;color:{_C['bodySlate']};padding-left:20px;margin:0;">{next_items_html}</ul>
+        </td>
+      </tr>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 28px 48px;text-align:center;">
+          <a href="{dashboard_url}" style="display:inline-block;background-color:{_C['clinicalTeal']};color:{_C['white']};font-family:{_F['ui']};text-decoration:none;padding:16px 40px;border-radius:{_R['sm']};font-size:16px;font-weight:700;">{cta_text}</a>
+        </td>
+      </tr>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 32px 48px;border-top:1px solid {_C['borderLine']};">
+          <p style="font-family:{_F['ui']};font-size:14px;color:{_C['bodySlate']};margin:24px 0 4px 0;">{sign_off}</p>
+          <p style="font-family:{_F['body']};font-size:16px;font-weight:700;color:{_C['instBlue']};margin:0;">{team_name}</p>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+{footer}
 </body>
 </html>"""
 
@@ -388,7 +402,7 @@ async def send_inquiry_declined_email(
             "atender su solicitud de consulta en este momento."
         )
         reason_html = (
-            f'<div style="background: #FEF3F2; border-left: 4px solid #B83D3D; padding: 16px; margin: 0 0 24px 0; border-radius: 0 8px 8px 0;">'
+            f'<div style="background-color:{_C["linen"]};border-left:4px solid {_C["error"]};padding:16px;margin:0 0 24px 0;border-radius:{_R["sm"]};">'
             f'<p style="font-size: 14px; color: #4A5568; margin: 0;"><strong>Motivo:</strong> {reason}</p></div>'
             if reason else ""
         )
@@ -423,7 +437,7 @@ async def send_inquiry_declined_email(
             "unable to take your consultation request at this time."
         )
         reason_html = (
-            f'<div style="background: #FEF3F2; border-left: 4px solid #B83D3D; padding: 16px; margin: 0 0 24px 0; border-radius: 0 8px 8px 0;">'
+            f'<div style="background-color:{_C["linen"]};border-left:4px solid {_C["error"]};padding:16px;margin:0 0 24px 0;border-radius:{_R["sm"]};">'
             f'<p style="font-size: 14px; color: #4A5568; margin: 0;"><strong>Reason:</strong> {reason}</p></div>'
             if reason else ""
         )
@@ -440,38 +454,47 @@ async def send_inquiry_declined_email(
         f'<li style="margin-bottom: 8px;">{item}</li>' for item in next_items
     )
 
+    head = email_head()
+    header = email_header("navy", locale, "medikah")
+    footer = email_footer(locale)
     html_body = f"""\
 <!DOCTYPE html>
-<html>
-<head><meta name="color-scheme" content="light"></head>
-<body style="margin: 0; padding: 0; background-color: #FAFAFB;">
-<div style="font-family: 'Mulish', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #FFFFFF; border-radius: 12px; overflow: hidden;">
-  <div style="background-color: #FFFFFF; text-align: center; border-bottom: 4px solid #1B2A41;">
-    <div style="padding: 32px 48px;">
-      <p style="font-size: 32px; font-weight: 800; color: #1B2A41; margin: 0;">medikah</p>
-      <p style="font-size: 13px; color: #2C7A8C; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin: 12px 0 0 0;">{header_text}</p>
-    </div>
-  </div>
-  <div style="padding: 48px; background: #FFFFFF;">
-    <p style="font-size: 20px; font-weight: 600; color: #1B2A41; margin: 0 0 24px 0;">{greeting}</p>
-    <p style="font-size: 16px; line-height: 1.7; color: #4A5568; margin: 0 0 24px 0;">{intro}</p>
-    {reason_html}
-    <div style="margin: 0 0 28px 0;">
-      <p style="font-size: 14px; font-weight: 700; color: #1B2A41; margin: 0 0 12px 0;">{next_title}</p>
-      <ul style="font-size: 14px; line-height: 1.8; color: #4A5568; padding-left: 20px; margin: 0;">{next_items_html}</ul>
-    </div>
-    <div style="text-align: center; margin: 0 0 28px 0;">
-      <a href="{dashboard_url}" style="display: inline-block; background: #2C7A8C; color: #FFFFFF; text-decoration: none; padding: 18px 40px; border-radius: 8px; font-size: 16px; font-weight: 700;">{cta_text}</a>
-    </div>
-    <div style="margin-top: 32px; padding-top: 24px; border-top: 2px solid #F0F4F5;">
-      <p style="font-size: 14px; color: #4A5568; margin: 0 0 4px 0;">{sign_off}</p>
-      <p style="font-size: 16px; font-weight: 700; color: #1B2A41; margin: 0;">{team_name}</p>
-    </div>
-  </div>
-  <div style="background-color: #F5F7F8; padding: 28px 48px; text-align: center; border-top: 4px solid #1B2A41;">
-    <p style="font-size: 12px; color: #9CA3AF; margin: 0;">Medikah Corporation &middot; Incorporated in Delaware, USA</p>
-  </div>
-</div>
+<html lang="{locale}">
+{head}
+<body style="margin:0;padding:0;background-color:{_PAGE_BG};font-family:{_F['body']};color:{_C['bodySlate']};">
+{header}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:{_PAGE_BG};padding:40px 20px;">
+  <tr><td align="center">
+    <table role="presentation" class="email-container" width="600" cellpadding="0" cellspacing="0" style="background-color:{_C['white']};border-radius:{_R['md']};overflow:hidden;">
+      <tr>
+        <td class="email-pad" style="padding:40px 48px 0 48px;">
+          <p style="font-family:{_F['ui']};font-size:13px;color:{_C['clinicalTeal']};font-weight:600;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 16px 0;">{header_text}</p>
+          <p style="font-family:{_F['body']};font-size:20px;font-weight:600;color:{_C['deepCharcoal']};margin:0 0 24px 0;">{greeting}</p>
+          <p style="font-family:{_F['ui']};font-size:16px;line-height:1.7;color:{_C['bodySlate']};margin:0 0 24px 0;">{intro}</p>
+          {reason_html}
+        </td>
+      </tr>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 28px 48px;">
+          <p style="font-family:{_F['body']};font-size:14px;font-weight:700;color:{_C['instBlue']};margin:0 0 12px 0;">{next_title}</p>
+          <ul style="font-family:{_F['ui']};font-size:14px;line-height:1.8;color:{_C['bodySlate']};padding-left:20px;margin:0;">{next_items_html}</ul>
+        </td>
+      </tr>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 28px 48px;text-align:center;">
+          <a href="{dashboard_url}" style="display:inline-block;background-color:{_C['clinicalTeal']};color:{_C['white']};font-family:{_F['ui']};text-decoration:none;padding:16px 40px;border-radius:{_R['sm']};font-size:16px;font-weight:700;">{cta_text}</a>
+        </td>
+      </tr>
+      <tr>
+        <td class="email-pad" style="padding:0 48px 32px 48px;border-top:1px solid {_C['borderLine']};">
+          <p style="font-family:{_F['ui']};font-size:14px;color:{_C['bodySlate']};margin:24px 0 4px 0;">{sign_off}</p>
+          <p style="font-family:{_F['body']};font-size:16px;font-weight:700;color:{_C['instBlue']};margin:0;">{team_name}</p>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+{footer}
 </body>
 </html>"""
 
