@@ -96,7 +96,7 @@ def _build_welcome_html(physician_data: dict, locale: str = "en") -> str:
     )
 
     head = email_head()
-    header = email_header("navy", locale, "medikah")
+    header = email_header("linen", locale, "medikah")
     footer = email_footer(locale)
     return f"""\
 <!DOCTYPE html>
@@ -298,7 +298,7 @@ async def send_inquiry_accepted_email(
     )
 
     head = email_head()
-    header = email_header("navy", locale, "medikah")
+    header = email_header("linen", locale, "medikah")
     footer = email_footer(locale)
     html_body = f"""\
 <!DOCTYPE html>
@@ -455,7 +455,7 @@ async def send_inquiry_declined_email(
     )
 
     head = email_head()
-    header = email_header("navy", locale, "medikah")
+    header = email_header("linen", locale, "medikah")
     footer = email_footer(locale)
     html_body = f"""\
 <!DOCTYPE html>

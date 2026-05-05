@@ -366,7 +366,7 @@ async def _perform_scheduling(
     if _ec_locale not in ("en", "es"):
         _ec_locale = "en"
     _ec_head = email_chrome.email_head()
-    _ec_header = email_chrome.email_header("navy", _ec_locale, "medikah")  # type: ignore[arg-type]
+    _ec_header = email_chrome.email_header("linen", _ec_locale, "medikah")  # type: ignore[arg-type]
     _ec_footer = email_chrome.email_footer(_ec_locale)  # type: ignore[arg-type]
     _ec_C = email_chrome.TOKENS["colors"]
     _ec_F = email_chrome.TOKENS["fonts"]
