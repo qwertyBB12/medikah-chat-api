@@ -7,9 +7,9 @@ Per Phase 11 D-11: httpx async + tenacity retry on idempotent reads.
 Per Phase 11 D-12: idempotency via GET-before-POST (Mailcow has no Idempotency-Key header).
 Per Phase 11 D-19: sandbox mode prefixes domain names with 'sandbox-'.
 
-OPERATOR NOTE (per Phase 11 D-17): MAILCOW_API_KEY rotation is a Phase 10 carry-item.
-The current key returns 401. Plan 11-07 staging dry-run will fail loudly until rotated.
-Rotation steps: Mailcow admin → Configuration → Access → API → Regenerate → update Render env.
+ENV: requires MAILCOW_API_URL (origin, e.g. https://practikah.medikah.health — NOT the
+/admin path) and MAILCOW_API_KEY (the R/W key from Mailcow admin → Configuration → Access
+→ API). Both must be set in Netlify production env or staging Render env.
 
 Resource cleanup ordering: Mailcow forbids deleting a domain with active mailboxes.
 The orchestrator's rollback runner walks the log in reverse step order, which yields

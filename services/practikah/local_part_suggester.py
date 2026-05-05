@@ -14,10 +14,9 @@ Mitigations:
   T-12-02-01: LOCAL_PART_REGEX rejects non-RFC-5321 local parts before Mailcow call.
   T-12-02-07: Caller rate-limits to 10/minute via SlowAPI; Mailcow upstream also limits.
 
-OPERATOR NOTE (D-23): MAILCOW_API_KEY is currently 401 on the live VPS. Until the key
-is rotated (Mailcow admin → Configuration → Access → API), check_candidate_availability
-will return available=False for all mailcow_check results. The block-list checks
-(reserved/invalid) still work without the Mailcow API.
+ENV: requires MAILCOW_API_URL + MAILCOW_API_KEY. When either is missing, fails closed
+(returns available=False for mailcow_check results) — block-list checks (reserved/invalid)
+still work without the Mailcow API.
 """
 
 from __future__ import annotations
