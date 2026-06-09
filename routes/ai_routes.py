@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from utils.auth import AuthenticatedPhysician, authenticated_physician
 from utils.openai_client import get_openai_client
 
 logger = logging.getLogger(__name__)
@@ -84,11 +85,17 @@ class DiagnosisResponse(BaseModel):
 
 @router.post("/diagnosis", response_model=DiagnosisResponse)
 @limiter.limit("10/minute")
-async def ai_diagnosis(request: Request, body: DiagnosisRequest) -> DiagnosisResponse:
+async def ai_diagnosis(
+    request: Request,
+    body: DiagnosisRequest,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> DiagnosisResponse:
     """Generate a ranked differential diagnosis for clinical decision support.
 
-    This endpoint is stateless and does not store any data.
-    Intended for use by licensed physicians only.
+    This endpoint is stateless and does not store any data. Restricted to
+    authenticated physicians (any verification status) — matches the auth gate
+    on the rest of the physician dashboard; the AI tool already sends the same
+    NextAuth bearer token its sibling dashboard components do.
     """
     if _openai_client is None:
         raise HTTPException(
