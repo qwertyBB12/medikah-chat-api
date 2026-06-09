@@ -55,7 +55,15 @@ if NEXTAUTH_SECRET is None:
     logging.warning("NEXTAUTH_SECRET not set; auth dependency will reject all requests.")
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Medikah Chat API")
+# Disable interactive API docs (/docs, /redoc, /openapi.json) in production —
+# they advertise the full endpoint surface (provisioning, billing, webhooks).
+_DOCS_ENABLED = not is_production()
+app = FastAPI(
+    title="Medikah Chat API",
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+)
 app.state.limiter = limiter
 
 
@@ -803,25 +811,14 @@ def ping() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict:
-    """Health check endpoint with diagnostics."""
-    ai_test = None
-    if openai_client:
-        try:
-            completion = await openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": "Say hello in 3 words"}],
-                max_tokens=20,
-            )
-            ai_test = completion.choices[0].message.content.strip() if completion.choices else "empty"
-        except Exception as exc:
-            ai_test = f"ERROR: {exc}"
+    """Health check endpoint with diagnostics (no external API calls)."""
     return {
         "status": "ok",
         "openai_client": openai_client is not None,
         "ai_responder": ai_responder is not None,
         "supabase": conversation_store._use_db,
         "sandbox_mode": EMAIL_SANDBOX_MODE,
-        "ai_test": ai_test,
+        "ai_test": "configured" if openai_client else "not_configured",
         "doxy_room_url": DOXY_ROOM_URL or "(not set)",
         "doxy_base_url": DOXY_BASE_URL or "(not set)",
     }
