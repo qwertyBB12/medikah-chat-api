@@ -25,12 +25,13 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from db.client import get_supabase
 from utils.auth import AuthenticatedPhysician, verified_physician
+from utils.password_policy import validate_password
 from services.practikah.orchestrator import (
     ProvisioningResult,
     check_domain_availability,
@@ -85,6 +86,11 @@ class ProvisionRequest(BaseModel):
     registrant_email: str = Field(default="", max_length=255)
     registrant_country: str = Field(default="US", min_length=2, max_length=3)
     tld_strategy: str = Field(default="real", pattern=r"^(real|mocked)$")
+
+    @field_validator("mailbox_password")
+    @classmethod
+    def _enforce_password_policy(cls, v: str) -> str:
+        return validate_password(v)
 
 
 class ProvisionResponse(BaseModel):
@@ -141,6 +147,11 @@ class WizardCompleteRequest(BaseModel):
         pattern=r"^[a-z0-9._-]+$",
     )
     mailbox_password: str = Field(..., min_length=12)
+
+    @field_validator("mailbox_password")
+    @classmethod
+    def _enforce_password_policy(cls, v: str) -> str:
+        return validate_password(v)
 
 
 class WizardCompleteResponse(BaseModel):
@@ -673,6 +684,11 @@ async def wizard_complete(
 class MailboxChangePasswordRequest(BaseModel):
     current_password: str = Field(..., min_length=1)
     new_password: str = Field(..., min_length=12)
+
+    @field_validator("new_password")
+    @classmethod
+    def _enforce_password_policy(cls, v: str) -> str:
+        return validate_password(v)
 
 
 class MailboxChangePasswordResponse(BaseModel):
