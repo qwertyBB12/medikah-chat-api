@@ -1,4 +1,15 @@
-"""AI clinical decision support routes."""
+"""AI clinical decision support routes.
+
+CUE-09 MIGRATION (Phase 22)
+----------------------------
+The gpt-4o call that was inline here (lines ~124 in the pre-migration version)
+now routes through `utils.openai_client.openai_complete()` — a provider-neutral
+`complete(messages, model, max_tokens, temperature)` wrapper. A future US-BAA
+provider or Claude can drop in with zero edits to this file.
+
+No Anthropic-specific types appear here (D1 rule — verified by
+tests/cue/test_no_provider_leak.py).
+"""
 
 from __future__ import annotations
 
@@ -11,14 +22,16 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from utils.auth import AuthenticatedPhysician, authenticated_physician
-from utils.openai_client import get_openai_client
+from utils.openai_client import openai_complete
 
 logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-_openai_client = get_openai_client()
+# ---------------------------------------------------------------------------
+# System prompt (preserved verbatim from pre-migration; rule #8 = no PII)
+# ---------------------------------------------------------------------------
 
 _DIAGNOSIS_SYSTEM_PROMPT = """\
 You are a clinical decision support tool for licensed physicians on the Medikah \
@@ -45,6 +58,11 @@ additional history or examination findings would help narrow the differential.
 Work only with the clinical presentation provided.
 9. Respond in the same language as the input (English or Spanish).
 """
+
+# Model + params (OpenAI; CUE-09 seam — swap in adapter.complete() here for Anthropic)
+_DIAGNOSIS_MODEL = "gpt-4o"
+_DIAGNOSIS_MAX_TOKENS = 1200
+_DIAGNOSIS_TEMPERATURE = 0.3
 
 
 class DiagnosisRequest(BaseModel):
@@ -97,12 +115,6 @@ async def ai_diagnosis(
     on the rest of the physician dashboard; the AI tool already sends the same
     NextAuth bearer token its sibling dashboard components do.
     """
-    if _openai_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="AI service is not configured. Please check OPENAI_API_KEY.",
-        )
-
     # Build the user prompt with optional demographic context
     user_parts = [f"Clinical presentation: {body.symptoms}"]
     if body.age_range:
@@ -120,25 +132,27 @@ async def ai_diagnosis(
         "End with a Red Flags section."
     )
 
+    messages = [
+        {"role": "system", "content": _DIAGNOSIS_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # CUE-09: route through provider-neutral openai_complete() instead of
+    # calling _openai_client.chat.completions.create() directly.
+    # A provider swap (Claude/BAA) needs zero edits to this block.
     try:
-        completion = await _openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": _DIAGNOSIS_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=1200,
-            temperature=0.3,
+        raw_text = await openai_complete(
+            messages=messages,
+            model=_DIAGNOSIS_MODEL,
+            max_tokens=_DIAGNOSIS_MAX_TOKENS,
+            temperature=_DIAGNOSIS_TEMPERATURE,
         )
 
-        choice = completion.choices[0] if completion.choices else None
-        if not choice or not choice.message or not choice.message.content:
+        if raw_text is None:
             raise HTTPException(
-                status_code=502,
-                detail="AI service returned an empty response.",
+                status_code=503,
+                detail="AI service is not configured or returned an empty response.",
             )
-
-        raw_text = choice.message.content.strip()
 
         # Parse the response into structured format
         differentials, red_flags = _parse_diagnosis_response(raw_text)
