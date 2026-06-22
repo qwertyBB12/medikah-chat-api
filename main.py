@@ -35,6 +35,7 @@ from utils.scheduling import (
 from routes.physician_routes import router as physician_router
 from routes.ai_routes import router as ai_router
 from routes.practikah_routes import router as practikah_router
+from routes.cue_routes import router as cue_router
 from utils.openai_client import get_openai_client
 from db.client import is_production
 
@@ -91,6 +92,7 @@ app.add_middleware(
 app.include_router(physician_router)
 app.include_router(ai_router)
 app.include_router(practikah_router)
+app.include_router(cue_router)  # CUE-08: /cue router — gated by authenticated_physician
 
 
 @app.on_event("startup")
