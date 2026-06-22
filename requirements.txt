@@ -13,3 +13,8 @@ httpx
 tenacity
 pyjwt[crypto]
 stripe
+# Phase 22 — Cue provider-agnostic reasoning foundation (CUE-01/02/05/07)
+anthropic==0.111.0
+# Test stack — CUE-09/D1 provider-leak guard
+pytest
+pytest-asyncio

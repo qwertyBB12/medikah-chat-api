@@ -1,13 +1,26 @@
-"""GPT-4o powered response generation for the triage conversation."""
+"""GPT-4o powered response generation for the triage conversation.
+
+CUE-09 MIGRATION (Phase 22)
+----------------------------
+The gpt-4o call that was inline in AITriageResponseGenerator.generate_response()
+(pre-migration line ~232: client.chat.completions.create(...)) now routes through
+`utils.openai_client.openai_complete()` — a provider-neutral
+`complete(messages, model, max_tokens, temperature)` wrapper.
+
+A future US-BAA provider or Claude can drop in with zero edits to this class.
+The graceful-None fallback for callers is preserved unchanged.
+
+No Anthropic-specific types appear here (D1 rule — verified by
+tests/cue/test_no_provider_leak.py).
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Callable, List, Optional
 
-from openai import AsyncOpenAI
-
 from services.conversation_state import ConversationStage, IntakeHistory
+from utils.openai_client import openai_complete
 
 logger = logging.getLogger(__name__)
 
@@ -189,17 +202,24 @@ book your visit now?" before any appointment is actually created.\
 
 
 class AITriageResponseGenerator:
-    """Generates AI-powered responses with graceful fallback."""
+    """Generates AI-powered responses with graceful fallback.
+
+    CUE-09: The direct OpenAI client is no longer held here. Calls route
+    through openai_complete() — the provider-neutral wrapper in
+    utils/openai_client.py. Constructor signature is preserved for
+    backwards-compatibility with the caller in services/triage.py.
+    """
 
     def __init__(
         self,
-        openai_client: AsyncOpenAI,
+        openai_client: object,  # kept for backwards-compat; ignored internally
         prompt_builder: TriagePromptBuilder,
         model: str = "gpt-4o",
         max_tokens: int = 400,
         temperature: float = 0.8,
     ) -> None:
-        self._client = openai_client
+        # openai_client param kept for caller backwards-compatibility.
+        # The actual call now goes through openai_complete() (CUE-09).
         self._prompt_builder = prompt_builder
         self._model = model
         self._max_tokens = max_tokens
@@ -229,19 +249,18 @@ class AITriageResponseGenerator:
             # Add current user message
             messages.append({"role": "user", "content": user_message})
 
-            completion = await self._client.chat.completions.create(
-                model=self._model,
+            # CUE-09: route through provider-neutral openai_complete() instead of
+            # calling self._client.chat.completions.create() directly.
+            result = await openai_complete(
                 messages=messages,
+                model=self._model,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
             )
 
-            choice = completion.choices[0] if completion.choices else None
-            if choice and choice.message and choice.message.content:
-                return choice.message.content.strip()
-
-            logger.warning("Empty response from OpenAI for stage %s", stage)
-            return None
+            if result is None:
+                logger.warning("Empty/None response from openai_complete for stage %s", stage)
+            return result
 
         except Exception as exc:
             logger.exception("AI response generation failed for stage %s: %s", stage, exc)
