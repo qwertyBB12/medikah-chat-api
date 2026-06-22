@@ -13,8 +13,9 @@ Gate envelope order (CUE-04 / AI-SPEC §3):
   5. Daily budget  — budget_check() per physician (CUE-06)
   6. Origin guard  — CUE-04d create.ts-style origin check on state-changing route
   7. Context       — assemble() clinical system prompt (Plan 22-03)
-  8. Stream        — adapter.stream() tee'd into captured[] for post-stream judge
-  9. Background    — BackgroundTasks: record_usage + stub judge (CUE-04b non-blocking)
+  8. Tool loop     — run_cue_turn() multi-step tool_use/tool_result loop (Plan 22-06; CUE-03)
+  9. Stream        — final text streamed to client (AI-SPEC §4b.2)
+  10. Background   — BackgroundTasks: record_usage + stub judge (CUE-04b non-blocking)
 
 Per-physician rate limit (CUE-04c):
   The EXISTING slowapi limiter from main.py is reused (do NOT instantiate a second one).
@@ -41,9 +42,13 @@ CUE-11 — physician_id discipline:
   It is NEVER read from the request body or any tool argument.
   All Supabase reads are scoped to this session-derived id.
 
-Plan 06 note (tool loop deferred):
-  The stream is a single-shot text turn through adapter.stream() in Phase 22.
-  Plan 22-06 will swap in run_cue_turn() (the multi-step tool_use/tool_result loop).
+Plan 22-06 — tool loop:
+  The single-shot adapter.stream() (Plan 05) is replaced by run_cue_turn()
+  (services/cue/engine.py), which drives the multi-step tool_use/tool_result
+  loop.  After run_cue_turn() returns the assembled final_text, the route
+  streams it to the client as a StreamingResponse (AI-SPEC §4b.2 pattern).
+  Real usage counts (from the non-streaming loop path) are recorded on the
+  background task.
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ from slowapi import Limiter
 
 from db.client import get_supabase
 from services.cue.adapter import create_adapter, select_model
+from services.cue.engine import run_cue_turn
 from services.cue.gate import (
     BudgetStatus,
     KillSwitchResult,
@@ -239,34 +245,54 @@ async def cue_chat(
     model = select_model(tier="sonnet")  # AI-SPEC §4 default reasoning brain
 
     # ------------------------------------------------------------------
-    # Stream — tee into captured[] for post-stream judge (CUE-04b)
+    # Tool loop + stream — Plan 22-06 (CUE-03)
+    # run_cue_turn drives the tool_use/tool_result loop via adapter.complete()
+    # for tool-detection rounds (tool_use blocks are NOT in the delta stream),
+    # then returns the assembled final_text.  The route streams that text to
+    # the client as a StreamingResponse (AI-SPEC §4b.2).
     # ------------------------------------------------------------------
     adapter = create_adapter("anthropic")
     captured: list[str] = []
+    usage_totals: dict = {"input_tokens": 0, "output_tokens": 0}
+
+    # Truncate history to last 10 turns (AI-SPEC §4 context strategy).
+    messages = body.messages[-_MAX_MESSAGES:]
 
     async def _token_gen() -> AsyncIterator[bytes]:
-        """Stream text chunks; tee each into `captured` for the judge."""
+        """
+        Run the tool loop and stream the assembled final_text to the client.
+
+        run_cue_turn() drives all tool_use/tool_result rounds (each using
+        adapter.complete()), then returns the final assembled text.  We then
+        yield the final text as a stream (AI-SPEC §4b.2 UX pattern).
+
+        The real TTFT optimization (calling adapter.stream() on the last turn
+        when no tools were used) is a Phase-23 enhancement; Phase 22 streams
+        the pre-assembled text directly.
+        """
+        nonlocal usage_totals
         try:
-            # Truncate history to last 10 turns (AI-SPEC §4 context strategy)
-            messages = body.messages[-_MAX_MESSAGES:]
-            async for chunk in adapter.stream(
+            final_text, usage_totals = await run_cue_turn(
+                adapter,
                 model=model,
                 system_prompt=system_prompt,
                 messages=messages,
+                physician_id=physician_id,
                 max_tokens=body.max_tokens,
-            ):
-                captured.append(chunk)
-                yield chunk.encode("utf-8")
+            )
+            captured.append(final_text)
+            yield final_text.encode("utf-8")
         except Exception as exc:
             logger.error(
-                "[cue] stream error for physician=%s: %s", physician_id, exc
+                "[cue] run_cue_turn error for physician=%s: %s", physician_id, exc
             )
-            # Surface a minimal error string rather than crashing the generator
+            # Surface a minimal error string rather than crashing the generator.
             error_chunk = (
                 "\n[Cue no pudo completar la respuesta. Intenta de nuevo.]"
                 if body.locale == "es"
                 else "\n[Cue could not complete the response. Please try again.]"
             )
+            captured.append(error_chunk)
             yield error_chunk.encode("utf-8")
 
     # ------------------------------------------------------------------
@@ -296,7 +322,7 @@ async def cue_chat(
             assistant_text = "".join(captured)
 
             # Phase 22 stub judge — logs the turn for observability.
-            # Replace with the real memory/flag judge in Plan 22-05 (Phase 25).
+            # Replace with the real memory/flag judge in Phase 25 (MEM-02/MEM-06).
             try:
                 logger.info(
                     "[cue] post-stream judge stub: physician=%s chars_in=%d chars_out=%d",
@@ -313,18 +339,19 @@ async def cue_chat(
                     judge_exc,
                 )
 
-            # Approximate token counts from character lengths (real counts from
-            # stream usage events are not available in streaming mode without a
-            # secondary complete() call — record_usage uses approximation here;
-            # Phase 25 will wire actual usage from the non-streaming tool-loop path).
-            approx_in  = max(1, len(system_prompt) // 4)
-            approx_out = max(1, len(assistant_text) // 4)
+            # Plan 22-06: real token counts from the tool-loop path are in
+            # usage_totals (accumulated across all tool rounds by run_cue_turn).
+            # Fall back to character-length approximation if totals are zero.
+            real_in  = usage_totals.get("input_tokens", 0)
+            real_out = usage_totals.get("output_tokens", 0)
+            in_tokens  = real_in  if real_in  > 0 else max(1, len(system_prompt) // 4)
+            out_tokens = real_out if real_out > 0 else max(1, len(assistant_text) // 4)
 
             await record_usage(
                 supabase,
                 physician_id,
-                approx_in,
-                approx_out,
+                in_tokens,
+                out_tokens,
                 tier,
             )
 
