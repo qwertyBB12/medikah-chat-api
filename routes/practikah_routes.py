@@ -943,7 +943,7 @@ async def mailbox_imap_credentials(
     username = f"{mailbox_local_part}@medikah.health"
 
     return ImapCredentialsResponse(
-        host="mail.medikah.health",
+        host="practikah.medikah.health",
         imap_port=993,
         smtp_port=465,
         smtp_starttls_port=587,
