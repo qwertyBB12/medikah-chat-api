@@ -39,6 +39,7 @@ THREAT MITIGATIONS (T-23-01-01, T-23-01-02)
 
 from __future__ import annotations
 
+import getpass
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -241,8 +242,18 @@ def main(local_part: str, app_passwd: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <local_part> <temp-app-passwd>")
-        print(f"  e.g.: {sys.argv[0]} hlopez s3cr3t-app-pass")
+    if not CALDAV_AVAILABLE:
+        print("ERROR: caldav/icalendar not importable in this interpreter.")
+        print("  Run: /tmp/cueprobe/bin/pip install caldav==3.2.1 icalendar==7.1.3")
         sys.exit(1)
-    main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <local_part>")
+        print(f"  e.g.: {sys.argv[0]} hector")
+        print("  You are prompted for the CalDAV password (silent — not echoed, not")
+        print("  stored in shell history). Use your SOGo webmail login password.")
+        sys.exit(1)
+    _pw = getpass.getpass("CalDAV password (silent — your SOGo login): ")
+    if not _pw:
+        print("ERROR: no password entered.")
+        sys.exit(1)
+    main(sys.argv[1], _pw)
