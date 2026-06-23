@@ -84,6 +84,29 @@ NEUTRAL_TOOLS: list[CueNeutralTool] = [
             "required": [],
         },
     ),
+    # ----- Phase 23 HANDS-02/04 (Plan 23-02) — read-only inbox headers -----
+    CueNeutralTool(
+        name="inbox_read_recent",
+        description=(
+            "Reads the authenticated physician's most recent inbox message HEADERS "
+            "(subject, sender, date) — READ-ONLY: it never marks mail as read and "
+            "never reads message bodies. "
+            "Use when the doctor asks what is new in their inbox or who has emailed "
+            "them recently. "
+            "Never accepts a physician_id argument — scope is always the "
+            "authenticated session."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max messages to return.  Default 10, max 20.",
+                }
+            },
+            "required": [],
+        },
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -138,6 +161,12 @@ async def dispatch_tool(
         from services.cue.tools.executors import inquiry_list_recent
         limit = int(safe_input.get("limit", 5))
         return await inquiry_list_recent(physician_id=physician_id, limit=min(limit, 20))
+
+    if tool_name == "inbox_read_recent":
+        # Phase 23 HANDS-02/04 — read-only inbox headers; limit hard-capped at 20.
+        from services.cue.tools.executors import inbox_read_recent
+        limit = int(safe_input.get("limit", 10))
+        return await inbox_read_recent(physician_id=physician_id, limit=min(limit, 20))
 
     # Unknown tool — raise so the engine returns an is_error tool_result
     raise ValueError(f"Unknown tool: {tool_name!r}")
