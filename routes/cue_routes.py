@@ -144,6 +144,23 @@ class CueConfirmWriteRequest(BaseModel):
     locale: str = "es"
 
 
+class CueTtsRequest(BaseModel):
+    """Body for POST /cue/tts (Plan 23-05 — VOICE-02/04).
+
+    physician_id comes from auth (CUE-11 — never from body). The voice is
+    resolved server-side by the catalog (provider-aware); the client only
+    supplies the text + locale.
+    """
+
+    text: str
+    locale: str = "es"               # "en" | "es" — physicians Spanish-first
+
+
+# POST /cue/transcribe accepts a raw audio body (no JSON model). Cap at 5MB —
+# ample for ~60s of speech and a cheap abuse guard (mirrors BeNeXT transcribe).
+_MAX_AUDIO_BYTES = 5 * 1024 * 1024
+
+
 # ---------------------------------------------------------------------------
 # Origin guard (CUE-04d — create.ts-style check on state-changing routes)
 # ---------------------------------------------------------------------------
@@ -681,6 +698,125 @@ async def cue_revoke_credential(
 
     revoked = await revoke_cue_credential(physician_id, ip=ip, ua=ua)
     return {"revoked": bool(revoked)}
+
+
+# ---------------------------------------------------------------------------
+# POST /cue/transcribe — STT (VOICE-08). Cloud (Voxtral) by default; no VPS.
+# Gate envelope: kill-switch → identity → origin. Same envelope as /cue/chat.
+# The transcript is TRANSIENT — returned to the client, never persisted
+# backend (T-23-05-02 / the HANDS-02 no-body-persist rule).
+# ---------------------------------------------------------------------------
+
+
+@router.post("/transcribe")
+@limiter.limit("20/minute")  # per-physician key via _physician_key_func
+async def cue_transcribe(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """Transcribe a posted audio blob → {transcript, language} (auto-detect EN/ES).
+
+    Body is the raw audio bytes (WAV/WebM/mp3). An optional `X-Locale: en|es`
+    header hints the language; otherwise the language is auto-detected (VOICE-08).
+    """
+    supabase = get_supabase()
+
+    # GATE 1: Kill-switch (CUE-04a / PATCH-02 — fail CLOSED). Locale unknown
+    # pre-transcribe; default to es for the bilingual unavailable message.
+    kill_status: KillSwitchResult = await check_kill_switch(supabase, "es")
+    if kill_status == "tripped":
+        raise HTTPException(status_code=503, detail=bilingual_unavailable("es"))
+
+    # GATE 2: Identity — session-derived only (CUE-11 — NEVER from body).
+    physician_id: str = auth.physician_id
+    request.state._cue_physician_id = physician_id  # noqa: SLF001
+
+    # GATE 3: Origin check (CUE-04d).
+    _check_origin(request)
+
+    audio = await request.body()
+    if not audio:
+        raise HTTPException(status_code=400, detail="Empty audio")
+    if len(audio) > _MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio too large (max 5MB)")
+
+    locale_hint = (request.headers.get("x-locale") or "").strip().lower() or None
+    content_type = request.headers.get("content-type") or "audio/webm"
+
+    from services.cue.voice import whisper_client
+
+    try:
+        result = await whisper_client.transcribe(
+            audio, language=locale_hint, content_type=content_type
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean 502, never leak audio
+        logger.error("[cue] transcribe failed physician=%s: %s", physician_id, exc)
+        raise HTTPException(status_code=502, detail="Transcription failed") from exc
+
+    # Transient — returned, never persisted (T-23-05-02).
+    return {"transcript": result.get("transcript", ""), "language": result.get("language")}
+
+
+# ---------------------------------------------------------------------------
+# POST /cue/tts — TTS (VOICE-02/04). Voxtral cloud default; F5 dormant.
+# Gate envelope: kill-switch → identity → origin. Voice resolved server-side by
+# the provider-aware catalog (id is namespace-valid for the selected provider).
+# ---------------------------------------------------------------------------
+
+
+@router.post("/tts")
+@limiter.limit("20/minute")  # per-physician key via _physician_key_func
+async def cue_tts(
+    request: Request,
+    body: CueTtsRequest,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> StreamingResponse:
+    """Synthesize `text` → audio stream in the doctor's resolved EN/ES voice."""
+    supabase = get_supabase()
+
+    # GATE 1: Kill-switch (CUE-04a / PATCH-02 — fail CLOSED).
+    kill_status: KillSwitchResult = await check_kill_switch(supabase, body.locale)
+    if kill_status == "tripped":
+        raise HTTPException(status_code=503, detail=bilingual_unavailable(body.locale))
+
+    # GATE 2: Identity — session-derived only (CUE-11 — NEVER from body).
+    physician_id: str = auth.physician_id
+    request.state._cue_physician_id = physician_id  # noqa: SLF001
+
+    # GATE 3: Origin check (CUE-04d).
+    _check_origin(request)
+
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty text")
+
+    from services.cue.voice.catalog import resolve
+    from services.cue.voice.providers import VoiceProviderError, create_tts_provider
+
+    # Resolve voice + provider (provider-aware; never crashes with zero DB rows).
+    selection = resolve(physician_id, body.locale, supabase=supabase)
+    provider = create_tts_provider(selection["provider"])
+
+    try:
+        audio = await provider.synthesize(
+            text=text, voice_id=selection["voice_id"], locale=body.locale
+        )
+    except VoiceProviderError as exc:
+        status = 503 if exc.kind == "unauthorized" else 502
+        logger.error(
+            "[cue] tts failed physician=%s provider=%s kind=%s",
+            physician_id,
+            selection["provider"],
+            exc.kind,
+        )
+        raise HTTPException(status_code=status, detail="Voice synthesis unavailable") from exc
+
+    media_type = "audio/mpeg" if selection["provider"] == "voxtral" else "audio/wav"
+    return StreamingResponse(
+        iter([audio]),
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # ---------------------------------------------------------------------------
