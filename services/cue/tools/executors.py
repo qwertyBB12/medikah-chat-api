@@ -12,9 +12,11 @@ hands executors real:
   - inbox_read_recent  (HANDS-02/04): reads recent inbox HEADERS read-only via
                                       IMAP (mark_seen=False).
 
-Plan 23-04 (WRITE increment) fills calendar_block_time / calendar_clear_range;
-here they are present (so the tool contract + tests import cleanly) but delegate
-to the calendar_dav NotImplementedError stubs.
+Plan 23-04 (WRITE increment) makes calendar_block_time / calendar_clear_range
+PURE PROPOSERS: each ALWAYS returns ONLY a confirm-card payload (json.dumps
+STRING) and NEVER writes. The actual mutation happens at the route-level
+POST /cue/calendar/confirm-write, OUTSIDE the model loop, after the doctor
+clicks Confirm (D-03). The model tool has no write path at all.
 
 CUE-11 IDOR DISCIPLINE — MANDATORY FOR ALL EXECUTORS
 ------------------------------------------------------
@@ -269,10 +271,43 @@ async def inbox_read_recent(
 
 # ---------------------------------------------------------------------------
 # calendar_block_time / calendar_clear_range executors (Plan 23-04 — WRITE)
-# Present so the tool contract + tests import cleanly. They delegate to the
-# calendar_dav NotImplementedError stubs until Plan 23-04 fills the bodies
-# (with the confirm-before-write envelope, D-03).
+#
+# D-03 TWO-COMPONENT DESIGN — these are PURE PROPOSERS. They NEVER write.
+# Each executor ALWAYS returns ONLY a confirm-card payload (json.dumps STRING in
+# the tool_result content) and NEVER calls calendar_dav, NEVER writes an audit
+# row, and has NO `confirmed` parameter and NO write branch. The actual mutation
+# happens ONLY at the route-level POST /cue/calendar/confirm-write, OUTSIDE the
+# model loop, after the doctor clicks Confirm. A single misheard/injected
+# tool_use therefore CANNOT mutate the calendar.
+#
+# SERIALIZATION CONTRACT (pinned — producer/parser must agree): the read
+# executors above return plain prose strings; THIS confirm payload is the only
+# JSON-encoded tool_result. run_cue_turn json.loads the tool_result and detects
+# kind=='confirm' to STOP the loop and surface pending_confirm.
 # ---------------------------------------------------------------------------
+
+
+def _range_summary(start_iso: str, end_iso: str) -> str:
+    """Human-readable bilingual range string for the confirm card (no PHI).
+
+    Best-effort: parses the ISO datetimes and formats a compact EN/ES range.
+    Falls back to the raw ISO strings if parsing fails (never raises — a
+    proposer must always produce a card).
+    """
+    from datetime import datetime
+
+    try:
+        s = datetime.fromisoformat(start_iso)
+        e = datetime.fromisoformat(end_iso)
+        same_day = s.date() == e.date()
+        day = s.strftime("%Y-%m-%d")
+        s_t = s.strftime("%H:%M")
+        e_t = e.strftime("%H:%M")
+        if same_day:
+            return f"{day} {s_t}–{e_t}"
+        return f"{day} {s_t} → {e.strftime('%Y-%m-%d')} {e_t}"
+    except Exception:
+        return f"{start_iso} → {end_iso}"
 
 
 async def calendar_block_time(
@@ -281,15 +316,27 @@ async def calendar_block_time(
     end_iso: str,       # functional arg
     title: str,         # functional arg
 ) -> str:
-    """STUB (Plan 23-04): propose/confirm a calendar block. Not wired in 23-02."""
-    from services.cue import calendar_dav
+    """PROPOSE a calendar block (D-03). NEVER writes — returns a confirm card only.
 
-    return await calendar_dav.block_time(
-        physician_id=physician_id,
-        start_iso=start_iso,
-        end_iso=end_iso,
-        title=title,
-    )
+    Returns ONLY the confirm-card payload as a JSON string. There is NO write
+    branch and NO `confirmed` parameter: even a model that emits confirmed=true
+    (stripped by _safe_tool_input anyway) cannot mutate the calendar from here.
+    The route-level confirm-write endpoint is the sole mutation path.
+    """
+    import json
+
+    rng = _range_summary(start_iso, end_iso)
+    payload = {
+        "kind": "confirm",
+        "action": "block",
+        "title": title,
+        "summary": (
+            f"¿Bloquear {rng} «{title}»? / Block {rng} “{title}”?"
+        ),
+        "start_iso": start_iso,
+        "end_iso": end_iso,
+    }
+    return json.dumps(payload)
 
 
 async def calendar_clear_range(
@@ -297,14 +344,27 @@ async def calendar_clear_range(
     start_iso: str,     # functional arg
     end_iso: str,       # functional arg
 ) -> str:
-    """STUB (Plan 23-04): propose/confirm a calendar clear. Not wired in 23-02."""
-    from services.cue import calendar_dav
+    """PROPOSE clearing Cue blocks in a range (D-03). NEVER writes — confirm card only.
 
-    return await calendar_dav.clear_range(
-        physician_id=physician_id,
-        start_iso=start_iso,
-        end_iso=end_iso,
-    )
+    Returns ONLY the confirm-card payload as a JSON string. No write branch, no
+    `confirmed` parameter. The route-level confirm-write endpoint performs the
+    actual (X-CUE-MANAGED-guarded) delete only after the doctor clicks Confirm.
+    """
+    import json
+
+    rng = _range_summary(start_iso, end_iso)
+    payload = {
+        "kind": "confirm",
+        "action": "clear",
+        "title": "",
+        "summary": (
+            f"¿Liberar los bloques de Cue en {rng}? / "
+            f"Clear Cue blocks in {rng}?"
+        ),
+        "start_iso": start_iso,
+        "end_iso": end_iso,
+    }
+    return json.dumps(payload)
 
 
 # ---------------------------------------------------------------------------

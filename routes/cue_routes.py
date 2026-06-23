@@ -53,9 +53,10 @@ Plan 22-06 — tool loop:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -127,6 +128,22 @@ class CueChatRequest(BaseModel):
     max_tokens: int = 1024     # AI-SPEC §4b.3: max_tokens MANDATORY, explicit limit
 
 
+class CueConfirmWriteRequest(BaseModel):
+    """Body for POST /cue/calendar/confirm-write (Plan 23-04 — the ONLY mutation).
+
+    physician_id and 'confirmed-ness' come from auth + the route call itself —
+    NEVER from this body. Calling the endpoint IS the confirmation (the doctor
+    clicked Confirm in the UI).
+    """
+
+    action: str                       # "block" | "clear"
+    start_iso: str
+    end_iso: str
+    title: Optional[str] = None       # required for block; ignored for clear
+    idempotency_token: str            # per-proposal UUID — dedup key (HANDS-04)
+    locale: str = "es"
+
+
 # ---------------------------------------------------------------------------
 # Origin guard (CUE-04d — create.ts-style check on state-changing routes)
 # ---------------------------------------------------------------------------
@@ -152,6 +169,26 @@ def _check_origin(request: Request) -> None:
             status_code=403,
             detail="Origin not allowed",
         )
+
+
+def _request_ip_ua(request: Request) -> tuple[Optional[str], Optional[str]]:
+    """Derive the audit IP + user-agent from the ROUTE's OWN Request (HANDS-08a).
+
+    ip = X-Forwarded-For first hop, else request.client.host.
+    ua = the User-Agent header.
+
+    NOTE: this is the per-ACTION audit source for the route-level write/revoke
+    paths (confirm-write, DELETE /credential). It is distinct from
+    _physician_key_func above — that is the IP-ONLY rate-limit KEY func (no UA),
+    NOT an audit source. Route audit attribution must use THIS helper.
+    """
+    xff = request.headers.get("X-Forwarded-For", "")
+    ip = xff.split(",")[0].strip() if xff else None
+    if not ip:
+        client = getattr(request, "client", None)
+        ip = getattr(client, "host", None) if client else None
+    ua = request.headers.get("user-agent")
+    return ip, ua
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +309,7 @@ async def cue_chat(
         """
         nonlocal usage_totals
         try:
-            final_text, usage_totals = await run_cue_turn(
+            final_text, usage_totals, pending_confirm = await run_cue_turn(
                 adapter,
                 model=model,
                 system_prompt=system_prompt,
@@ -282,6 +319,18 @@ async def cue_chat(
             )
             captured.append(final_text)
             yield final_text.encode("utf-8")
+            # D-03 surfacing (Plan 23-04): when a block/clear PROPOSER produced a
+            # confirm card, emit it AFTER the text as ONE structured sentinel line:
+            #   \x1e (RS) + compact JSON {"pending_confirm": {...}} + \n
+            # The plain-text path is byte-identical to Phase 22 when None.
+            # 23-03/23-06 parse this SAME framing (canonical contract).
+            if pending_confirm is not None:
+                sentinel = (
+                    b"\x1e"
+                    + json.dumps({"pending_confirm": pending_confirm}).encode("utf-8")
+                    + b"\n"
+                )
+                yield sentinel
         except Exception as exc:
             logger.error(
                 "[cue] run_cue_turn error for physician=%s: %s", physician_id, exc
@@ -378,6 +427,260 @@ async def cue_chat(
         media_type="text/plain; charset=utf-8",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /cue/calendar/confirm-write — the ONLY calendar mutation path (D-03)
+# ---------------------------------------------------------------------------
+
+
+def _confirm_write_lookup_cached(supabase, physician_id: str, token: str) -> Optional[dict]:
+    """Return the cached result_json for (physician_id, idempotency_token), or None.
+
+    Idempotency backstop (HANDS-04): a replayed token returns the cached result
+    (one VEVENT, stable uid) instead of writing twice.
+    """
+    if supabase is None:
+        return None
+    try:
+        res = (
+            supabase.table("cue_write_idempotency")
+            .select("result_json")
+            .eq("physician_id", physician_id)
+            .eq("idempotency_token", token)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, "data", None) or []
+        if rows:
+            return rows[0].get("result_json")
+    except Exception:
+        logger.exception(
+            "[cue] confirm-write idempotency lookup failed physician=%s", physician_id
+        )
+    return None
+
+
+def _confirm_write_store_result(
+    supabase, physician_id: str, token: str, result_json: dict
+) -> dict:
+    """Persist the result with INSERT ... ON CONFLICT DO NOTHING (concurrency backstop).
+
+    If a truly simultaneous second click also missed the lookup, the conflicting
+    INSERT no-ops; we re-read and return the now-cached result rather than
+    writing twice. Returns the authoritative result (cached on conflict).
+    """
+    if supabase is None:
+        return result_json
+    try:
+        # supabase-py upsert with ignore_duplicates mirrors INSERT ... ON CONFLICT
+        # (physician_id, idempotency_token) DO NOTHING — the composite PK is the
+        # concurrency backstop defined in migration 031.
+        (
+            supabase.table("cue_write_idempotency")
+            .upsert(
+                {
+                    "physician_id": physician_id,
+                    "idempotency_token": token,
+                    "result_json": result_json,
+                },
+                on_conflict="physician_id,idempotency_token",
+                ignore_duplicates=True,
+            )
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "[cue] confirm-write result persist failed physician=%s", physician_id
+        )
+    # Re-read so a concurrent winner's result is the one returned (never double-write).
+    cached = _confirm_write_lookup_cached(supabase, physician_id, token)
+    return cached if cached is not None else result_json
+
+
+def _write_confirm_audit(
+    supabase,
+    physician_id: str,
+    action: str,
+    detail: dict,
+    *,
+    ip: Optional[str],
+    ua: Optional[str],
+) -> None:
+    """Per-action audit row for a confirm-write (HANDS-08a writes path).
+
+    Writes {physician_id, action, range, deleted/skipped count, ip, ua} — the IP
+    and UA are derived from the route's OWN Request (this route HAS one). No
+    bodies, no secrets.
+    """
+    if supabase is None:
+        return
+    row_detail = dict(detail)
+    if ip is not None:
+        row_detail["ip"] = ip
+    if ua is not None:
+        row_detail["ua"] = ua
+    try:
+        supabase.table("workspace_audit_log").insert(
+            {
+                "physician_id": physician_id,
+                "actor_id": physician_id,
+                "actor_role": "physician",
+                "action": action,
+                "resource_type": "cue_hands",
+                "resource_id": None,
+                "detail": row_detail,
+            }
+        ).execute()
+    except Exception:
+        logger.exception(
+            "[cue] confirm-write audit insert failed action=%s physician=%s (non-fatal)",
+            action,
+            physician_id,
+        )
+
+
+@router.post("/calendar/confirm-write")
+@limiter.limit("20/minute")  # per-physician key via _physician_key_func
+async def cue_confirm_write(
+    request: Request,
+    body: CueConfirmWriteRequest,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """The ONLY calendar mutation path (D-03). Idempotent + per-action audited.
+
+    Gate envelope: kill-switch → identity FROM auth → origin. physician_id and
+    confirmed-ness come from auth+route, NEVER from the body — calling this
+    endpoint IS the confirmation (the doctor clicked Confirm in the UI).
+
+    Idempotency (HANDS-04): a replayed (physician_id, idempotency_token) returns
+    the cached result (exactly ONE block VEVENT, stable uid) and skips the write.
+    """
+    supabase = get_supabase()
+
+    # GATE 1: Kill-switch (CUE-04a) — confirm-write IS gated (HANDS-09a).
+    kill_status: KillSwitchResult = await check_kill_switch(supabase, body.locale)
+    if kill_status == "tripped":
+        raise HTTPException(
+            status_code=503, detail=bilingual_unavailable(body.locale)
+        )
+
+    # GATE 2: Identity — session-derived only (CUE-11 — NEVER from body).
+    physician_id: str = auth.physician_id
+    request.state._cue_physician_id = physician_id  # noqa: SLF001
+
+    # GATE 3: Origin check (CUE-04d) — state-changing route.
+    _check_origin(request)
+
+    action = (body.action or "").strip().lower()
+    if action not in ("block", "clear"):
+        raise HTTPException(status_code=400, detail="Invalid action")
+
+    # IDEMPOTENCY FIRST (HANDS-04): a replayed token returns the cached result.
+    token = body.idempotency_token
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing idempotency_token")
+    cached = _confirm_write_lookup_cached(supabase, physician_id, token)
+    if cached is not None:
+        logger.info(
+            "[cue] confirm-write idempotent replay physician=%s action=%s", physician_id, action
+        )
+        return cached
+
+    # Resolve the Cue credential (lazy-mint, kill-switch-gated inside the broker).
+    from services.cue.credential_broker import get_cue_cred
+    from services.cue.tools.executors import _load_workspace_context
+    from services.cue import calendar_dav
+
+    mailbox_local_part, verification_status = _load_workspace_context(physician_id)
+    if verification_status != "verified" or not mailbox_local_part:
+        raise HTTPException(status_code=403, detail="Workspace not connected")
+
+    cred = await get_cue_cred(physician_id, mailbox_local_part)
+
+    ip, ua = _request_ip_ua(request)
+
+    if action == "block":
+        title = body.title or "Blocked by Cue"
+        uid = await calendar_dav.block_time(
+            cred.username,
+            cred.password,
+            body.start_iso,
+            body.end_iso,
+            title,
+            physician_id=physician_id,
+        )
+        result: dict = {"blocked": True, "uid": uid}
+        _write_confirm_audit(
+            supabase,
+            physician_id,
+            "cue.calendar_block_time",
+            {"start_iso": body.start_iso, "end_iso": body.end_iso, "uid": uid},
+            ip=ip,
+            ua=ua,
+        )
+    else:  # clear
+        cleared = await calendar_dav.clear_range(
+            cred.username,
+            cred.password,
+            body.start_iso,
+            body.end_iso,
+            physician_id=physician_id,
+        )
+        result = {"deleted": cleared["deleted"], "skipped": cleared["skipped"]}
+        _write_confirm_audit(
+            supabase,
+            physician_id,
+            "cue.calendar_clear_range",
+            {
+                "start_iso": body.start_iso,
+                "end_iso": body.end_iso,
+                "deleted": cleared["deleted"],
+                "skipped": cleared["skipped"],
+            },
+            ip=ip,
+            ua=ua,
+        )
+
+    # Persist the result for idempotent replay (ON CONFLICT DO NOTHING backstop).
+    authoritative = _confirm_write_store_result(supabase, physician_id, token, result)
+    return authoritative
+
+
+# ---------------------------------------------------------------------------
+# DELETE /cue/credential — Disconnect Cue (HANDS-09 / HANDS-09a)
+# NOT fail-closed on the kill-switch: a doctor MUST be able to Disconnect Cue
+# DURING a tripped-kill-switch incident. Issuance + confirm-write are gated; revoke is not.
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/credential")
+@limiter.limit("5/minute")  # per-physician key via _physician_key_func
+async def cue_revoke_credential(
+    request: Request,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """Revoke the physician's Cue app-password (HANDS-09 single DELETE).
+
+    Gate: identity FROM auth → origin. The kill-switch is DELIBERATELY NOT
+    checked here — revoke must succeed even during a tripped-switch incident so a
+    doctor is never trapped with Cue connected. Revoke touches ONLY the Cue
+    app-passwd id, NEVER the doctor's mailbox login password. The audit row
+    carries IP+UA derived from THIS route's Request (HANDS-08a).
+    """
+    # GATE: Identity — session-derived only (CUE-11 — NEVER from body).
+    physician_id: str = auth.physician_id
+    request.state._cue_physician_id = physician_id  # noqa: SLF001
+
+    # GATE: Origin check (CUE-04d) — state-changing route. (No kill-switch gate.)
+    _check_origin(request)
+
+    ip, ua = _request_ip_ua(request)
+
+    from services.cue.credential_broker import revoke_cue_credential
+
+    revoked = await revoke_cue_credential(physician_id, ip=ip, ua=ua)
+    return {"revoked": bool(revoked)}
 
 
 # ---------------------------------------------------------------------------

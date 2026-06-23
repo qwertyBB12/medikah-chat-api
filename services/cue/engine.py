@@ -41,15 +41,29 @@ appear here.  The adapter translates internally.
 
 RETURN CONTRACT
 ---------------
-run_cue_turn() returns (final_text: str, usage_totals: dict).
+run_cue_turn() returns (final_text: str, usage_totals: dict, pending_confirm: dict | None).
 The caller (cue_routes.py) streams final_text to the client via adapter.stream()
 on the final text-only turn (AI-SPEC §4b.2: stream for UX on the final turn).
+
+D-03 SURFACING MECHANISM (Plan 23-04 — the H1 fix)
+---------------------------------------------------
+The block/clear model tools are PURE PROPOSERS: their executor returns ONLY a
+json.dumps confirm-card payload {kind:'confirm', action, title, summary,
+start_iso, end_iso} as the tool_result content. When run_cue_turn sees a
+tool_result that parses to {kind:'confirm'}, it STOPS the loop IMMEDIATELY and
+returns that dict as the THIRD value pending_confirm — it does NOT append the
+confirm tool_result back into working_messages (that re-entry is exactly what
+made the card re-emerge as model prose). /cue/chat then emits pending_confirm as
+a structured `\x1e` sentinel line so CueSurface renders the confirm card off the
+parsed payload, never off model prose. When no confirm payload appears,
+pending_confirm is None and behavior is identical to Phase 22.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from services.cue.adapter import CueModelAdapter, CueNeutralTool
 from services.cue.tools.registry import NEUTRAL_TOOLS, dispatch_tool
@@ -77,7 +91,7 @@ async def run_cue_turn(
     physician_id: str,               # from verified session — NEVER from tool args (CUE-11)
     max_tokens: int = 1024,
     max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
-) -> tuple[str, dict]:
+) -> tuple[str, dict, Optional[dict]]:
     """
     Drive the tool_use / tool_result agentic loop.
 
@@ -96,14 +110,20 @@ async def run_cue_turn(
 
     Returns
     -------
-    (final_text: str, usage_totals: dict)
-        final_text    — the assembled text of the terminal end_turn response.
-        usage_totals  — accumulated {"input_tokens": int, "output_tokens": int}
-                        across all rounds (for record_usage on the background path).
+    (final_text: str, usage_totals: dict, pending_confirm: dict | None)
+        final_text      — the assembled text of the terminal response (or the
+                          best-available text when a confirm card stops the loop).
+        usage_totals    — accumulated {"input_tokens": int, "output_tokens": int}
+                          across all rounds (for record_usage on the background path).
+        pending_confirm — the {kind:'confirm', ...} payload from a block/clear
+                          proposer tool_result that STOPPED the loop, else None
+                          (D-03 surfacing — Plan 23-04). When None, behavior is
+                          identical to Phase 22.
 
     The caller streams final_text to the client via adapter.stream() for UX
     (AI-SPEC §4b.2 pattern: complete() for tool-detection turns,
-    stream() for the final text-only turn).
+    stream() for the final text-only turn) and emits pending_confirm as the
+    structured `\x1e` sentinel line when non-None.
     """
     usage_totals: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
     working_messages: list[dict] = list(messages)
@@ -150,7 +170,7 @@ async def run_cue_turn(
                 physician_id,
                 len(final_text),
             )
-            return final_text, usage_totals
+            return final_text, usage_totals, None
 
         # ------------------------------------------------------------------
         # GRACEFUL: unexpected stop_reason (e.g. "max_tokens", "stop_sequence")
@@ -163,7 +183,7 @@ async def run_cue_turn(
                 physician_id,
             )
             final_text = _assemble_text(content)
-            return final_text, usage_totals
+            return final_text, usage_totals, None
 
         # ------------------------------------------------------------------
         # TOOL USE: execute each tool_use block and build tool_result replies
@@ -178,6 +198,8 @@ async def run_cue_turn(
 
         # 2. Execute each tool — scope is ALWAYS auth.physician_id (CUE-11).
         tool_results: list[dict] = []
+        pending_confirm: Optional[dict] = None
+        assistant_text = _assemble_text(content)  # best-available text for D-03 stop
         for block in content:
             block_type = _get_block_type(block)
             if block_type != "tool_use":
@@ -204,6 +226,20 @@ async def run_cue_turn(
                     physician_id,
                     len(result_text),
                 )
+
+                # D-03 SURFACING (Plan 23-04): a block/clear PROPOSER returns a
+                # json.dumps({kind:'confirm', ...}) tool_result. Detect it, capture
+                # it as pending_confirm, and STOP the loop — do NOT feed the confirm
+                # JSON back to the model (that re-entry made the card become prose).
+                parsed = _try_parse_confirm(result_text)
+                if parsed is not None:
+                    pending_confirm = parsed
+                    logger.debug(
+                        "[cue:engine] confirm card from tool %r — stopping loop physician=%s",
+                        tool_name,
+                        physician_id,
+                    )
+                    break
             except Exception as exc:
                 # Executor exception → is_error tool_result (AI-SPEC §3 Pitfall #2).
                 # The loop continues; the model adapts.
@@ -220,6 +256,12 @@ async def run_cue_turn(
                     "is_error": True,
                 })
 
+        # 2b. D-03 STOP: a confirm card was proposed — return it structurally as
+        #     pending_confirm WITHOUT appending the confirm tool_result back into
+        #     working_messages (no model re-entry → it can never re-emerge as prose).
+        if pending_confirm is not None:
+            return assistant_text, usage_totals, pending_confirm
+
         # 3. tool_result blocks MUST come FIRST in the content array
         #    (AI-SPEC §3 Pitfall #3 — Anthropic hard API requirement).
         #    No text blocks mixed in before tool_results.
@@ -234,7 +276,30 @@ async def run_cue_turn(
     logger.warning(
         "[cue:engine] round cap (%d) reached physician=%s", max_tool_rounds, physician_id
     )
-    return _ROUND_CAP_MESSAGE, usage_totals
+    return _ROUND_CAP_MESSAGE, usage_totals, None
+
+
+def _try_parse_confirm(result_text: Any) -> Optional[dict]:
+    """Return the confirm-card dict if result_text is a {kind:'confirm'} JSON string.
+
+    The block/clear proposer executors are the ONLY tool_results that are
+    JSON-encoded (the read executors return plain prose). A tool_result that
+    json.loads to a dict with kind=='confirm' is a D-03 confirm card; anything
+    else (prose, malformed JSON, a JSON object without kind=='confirm') returns
+    None so the loop proceeds normally.
+    """
+    if not isinstance(result_text, str):
+        return None
+    stripped = result_text.lstrip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, dict) and parsed.get("kind") == "confirm":
+        return parsed
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -8,9 +8,13 @@ READ increment (Plan 23-02):
   - get_calendar(...): resolve the physician's "personal" collection by probing
                        principal().calendars() (HANDS-10 — never a hardcoded slug).
 
-WRITE increment (Plan 23-04 — STUBBED here so the module imports cleanly):
-  - block_time(...)  : raise NotImplementedError("Plan 23-04")
-  - clear_range(...) : raise NotImplementedError("Plan 23-04")
+WRITE increment (Plan 23-04 — REAL):
+  - block_time(...)  : create a busy VEVENT tagged X-CUE-MANAGED (UTC), return uid.
+  - clear_range(...) : delete ONLY X-CUE-MANAGED events in range; doctor-authored
+                       (untagged) events are NEVER deleted; return {deleted, skipped}.
+  The SOLE caller is the route-level POST /cue/calendar/confirm-write (OUTSIDE the
+  model loop, after the doctor clicks Confirm — D-03). The model tools are PURE
+  PROPOSERS and never reach these functions.
 
 Credential discipline: the CalDAV client is built PER REQUEST from the Cue
 app-password (username/password) handed out by credential_broker.get_cue_cred.
@@ -31,8 +35,9 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -131,26 +136,143 @@ async def read_day(
 
 
 # ---------------------------------------------------------------------------
-# WRITE increment — STUBBED (Plan 23-04). Present so the module imports cleanly.
-# The real bodies (tagged X-CUE-MANAGED VEVENT create + blast-radius-guarded
-# delete) land in Plan 23-04 with the confirm-before-write envelope (D-03).
+# WRITE increment (Plan 23-04). The ONLY caller is the route-level
+# POST /cue/calendar/confirm-write (OUTSIDE the model loop, after the doctor
+# clicks Confirm — D-03). The in-loop model tools are PURE PROPOSERS and NEVER
+# reach these functions. Credentials (username/password) are the per-request
+# Cue app-password handed out by credential_broker.get_cue_cred — never stored
+# at module level, never logged. All times are stored in UTC (HANDS-03).
 # ---------------------------------------------------------------------------
 
 
+def _to_utc(iso: str) -> datetime:
+    """Parse an ISO 8601 string and convert to a tz-aware UTC datetime.
+
+    A naive datetime (no offset) is assumed to already be UTC. Storage is always
+    UTC (HANDS-03); the surface renders in the physician's local timezone.
+    """
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_cue_managed(comp: Any) -> bool:
+    """True iff the iCal component carries the X-CUE-MANAGED tag.
+
+    This is the SOLE blast-radius guard (HANDS-03 / RESEARCH Pitfall 4): only an
+    event Cue itself authored (and tagged) may be deleted by clear_range. A
+    doctor-authored event has no such property and must NEVER reach delete().
+    """
+    return comp.get(X_CUE_MANAGED) is not None
+
+
+def _build_block_calendar(uid: str, start_iso: str, end_iso: str, title: str) -> str:
+    """Serialize a single X-CUE-MANAGED VEVENT to an iCal string (UTC).
+
+    Uses the icalendar library (never hand-rolled .ics concatenation) so line
+    folding, escaping, and VEVENT structure are RFC-correct.
+    """
+    from icalendar import Calendar, Event, vText
+
+    vcal = Calendar()
+    vcal.add("prodid", "-//Medikah Cue//EN")
+    vcal.add("version", "2.0")
+
+    vevent = Event()
+    vevent.add("uid", uid)
+    vevent.add("summary", title)
+    vevent.add("dtstart", _to_utc(start_iso))
+    vevent.add("dtend", _to_utc(end_iso))
+    # HANDS-03 data-safety tag — confirmed to survive the SOGo round-trip
+    # (23-PROBE-FINDINGS §3, A7 PASS). This is what clear_range filters on.
+    vevent.add(X_CUE_MANAGED, vText("true"))
+    vcal.add_component(vevent)
+
+    return vcal.to_ical().decode("utf-8")
+
+
 async def block_time(
-    physician_id: str,
+    username: str,
+    password: str,
     start_iso: str,
     end_iso: str,
     title: str,
+    *,
+    physician_id: Optional[str] = None,
 ) -> str:
-    """STUB (Plan 23-04): create a busy VEVENT tagged X-CUE-MANAGED after confirm."""
-    raise NotImplementedError("Plan 23-04")
+    """Create a busy VEVENT tagged X-CUE-MANAGED and return its UID (HANDS-03).
+
+    Stored in UTC. The route (confirm-write) wraps the returned uid as
+    { "blocked": true, "uid": <uid> }. physician_id is accepted only for
+    log/trace correlation — it is NEVER part of the CalDAV identity (that is the
+    username/password credential).
+    """
+    uid = f"cue-{uuid.uuid4()}"
+    ical_str = _build_block_calendar(uid, start_iso, end_iso, title)
+
+    client = _cue_client(username, password)
+    if hasattr(client, "__enter__"):
+        with client as c:
+            cal = _resolve_calendar(c)
+            cal.save_event(ical_str)
+    else:
+        cal = _resolve_calendar(client)
+        cal.save_event(ical_str)
+
+    logger.info(
+        "[cue:caldav] block_time wrote uid=%s physician=%s", uid, physician_id
+    )
+    return uid
 
 
 async def clear_range(
-    physician_id: str,
+    username: str,
+    password: str,
     start_iso: str,
     end_iso: str,
-) -> int:
-    """STUB (Plan 23-04): delete ONLY X-CUE-MANAGED events in range after confirm."""
-    raise NotImplementedError("Plan 23-04")
+    *,
+    physician_id: Optional[str] = None,
+) -> dict:
+    """Delete ONLY X-CUE-MANAGED events in [start,end] (HANDS-03 blast-radius).
+
+    Returns EXACTLY {"deleted": <int>, "skipped": <int>}. A doctor-authored
+    (untagged) event is NEVER passed to delete() under any code path — the
+    delete() call is reachable only inside the `if _is_cue_managed(...)` branch.
+    A range with zero Cue-managed events deletes nothing and returns
+    {"deleted": 0, "skipped": <N>}.
+    """
+    start = _to_utc(start_iso)
+    end = _to_utc(end_iso)
+
+    def _sweep(cal: Any) -> dict:
+        deleted = 0
+        skipped = 0
+        events = cal.search(start=start, end=end, event=True)
+        for event in events:
+            comp = event.icalendar_component
+            if _is_cue_managed(comp):
+                # Reachable ONLY for Cue-tagged events (blast-radius guard).
+                event.delete()
+                deleted += 1
+            else:
+                # Doctor-authored event — left untouched, counted as skipped.
+                skipped += 1
+        return {"deleted": deleted, "skipped": skipped}
+
+    client = _cue_client(username, password)
+    if hasattr(client, "__enter__"):
+        with client as c:
+            cal = _resolve_calendar(c)
+            result = _sweep(cal)
+    else:
+        cal = _resolve_calendar(client)
+        result = _sweep(cal)
+
+    logger.info(
+        "[cue:caldav] clear_range deleted=%d skipped=%d physician=%s",
+        result["deleted"],
+        result["skipped"],
+        physician_id,
+    )
+    return result
