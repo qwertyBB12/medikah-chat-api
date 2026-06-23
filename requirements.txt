@@ -15,6 +15,11 @@ pyjwt[crypto]
 stripe
 # Phase 22 — Cue provider-agnostic reasoning foundation (CUE-01/02/05/07)
 anthropic==0.111.0
+# Phase 23 — Cue Slice-1 Hands: CalDAV + iCal + IMAP read-only (HANDS-01/02/03)
+caldav==3.2.1
+icalendar==7.1.3
+imap-tools==1.13.0
+# faster-whisper — pinned in Plan 23-05 after VPS footprint probe (VOICE-06)
 # Test stack — CUE-09/D1 provider-leak guard
 pytest
 pytest-asyncio
