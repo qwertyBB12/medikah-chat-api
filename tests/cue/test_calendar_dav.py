@@ -69,17 +69,13 @@ class TestBlockTimeTagsXCueManaged:
                 f"block_time missing required parameter: {required}"
             )
 
-    @pytest.mark.xfail(
-        reason="block_time body lands in Plan 23-04 (write increment); "
-        "Plan 23-02 ships it as a NotImplementedError stub (read-path only).",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_block_time_saves_event_with_x_cue_managed(self, monkeypatch):
         """block_time must write a VEVENT that includes X-CUE-MANAGED:true.
 
         Captures the iCal data passed to caldav calendar.save_event() and
-        asserts that the X-CUE-MANAGED property is present.
+        asserts that the X-CUE-MANAGED property is present. (Plan 23-04: real
+        write body — credentials are username/password, never module-level.)
         """
         from icalendar import Calendar as ICalendar
 
@@ -104,12 +100,20 @@ class TestBlockTimeTagsXCueManaged:
 
         # Patch the caldav.DAVClient constructor
         with patch("caldav.DAVClient", return_value=mock_client):
-            await block_time(
+            uid = await block_time(
+                "testdoc@medikah.health",
+                "app-passwd-secret",
+                "2026-07-01T10:00:00+00:00",
+                "2026-07-01T12:00:00+00:00",
+                "Blocked by Cue",
                 physician_id="test-phys-005",
-                start_iso="2026-07-01T10:00:00+00:00",
-                end_iso="2026-07-01T12:00:00+00:00",
-                title="Blocked by Cue",
             )
+
+        # block_time must return a stable Cue-namespaced uid (route wraps as
+        # {"blocked": true, "uid": uid}).
+        assert isinstance(uid, str) and uid.startswith("cue-"), (
+            f"block_time must return a 'cue-'-prefixed uid; got {uid!r}"
+        )
 
         assert len(saved_ical_data) >= 1, (
             "block_time must call calendar.save_event() to write the VEVENT"
@@ -157,18 +161,14 @@ class TestClearRangeBlastRadius:
                 f"clear_range missing required parameter: {required}"
             )
 
-    @pytest.mark.xfail(
-        reason="clear_range body lands in Plan 23-04 (write increment); "
-        "Plan 23-02 ships it as a NotImplementedError stub (read-path only).",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_clear_range_deletes_only_cue_managed_events(self, monkeypatch):
         """clear_range must filter on X-CUE-MANAGED and leave untagged events intact.
 
         Sets up two mock events: one Cue-managed, one doctor-authored.
         Asserts that delete() is called exactly once on the Cue-managed event
-        and never on the doctor-authored event.
+        and never on the doctor-authored event — the BLAST-RADIUS test. The
+        return shape is the canonical {deleted, skipped}.
         """
         from icalendar import Calendar as ICalendar, Event, vText
 
@@ -205,16 +205,16 @@ class TestClearRangeBlastRadius:
         mock_client.principal.return_value = mock_principal
 
         with patch("caldav.DAVClient", return_value=mock_client):
-            deleted_count = await clear_range(
+            result = await clear_range(
+                "testdoc@medikah.health",
+                "app-passwd-secret",
+                "2026-07-01T00:00:00+00:00",
+                "2026-07-01T23:59:59+00:00",
                 physician_id="test-phys-006",
-                start_iso="2026-07-01T00:00:00+00:00",
-                end_iso="2026-07-01T23:59:59+00:00",
             )
 
         # The Cue-managed event must have been deleted
-        cue_event.delete.assert_called_once(), (
-            "HANDS-03: clear_range must delete the X-CUE-MANAGED event"
-        )
+        cue_event.delete.assert_called_once()
 
         # The doctor-authored event must NOT have been deleted
         doctor_event.delete.assert_not_called(), (
@@ -222,19 +222,18 @@ class TestClearRangeBlastRadius:
             "(no X-CUE-MANAGED property). Blast-radius protection failed."
         )
 
-        # Return value must reflect the count of deleted events
-        assert deleted_count == 1, (
-            f"clear_range must return the count of deleted events (expected 1, got {deleted_count})"
+        # Canonical return shape: exactly one deleted, one skipped (the doctor's).
+        assert result == {"deleted": 1, "skipped": 1}, (
+            f"clear_range must return {{deleted:1, skipped:1}} for a mixed range; got {result}"
         )
 
-    @pytest.mark.xfail(
-        reason="clear_range body lands in Plan 23-04 (write increment); "
-        "Plan 23-02 ships it as a NotImplementedError stub (read-path only).",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_clear_range_returns_zero_when_no_cue_events(self, monkeypatch):
-        """clear_range on a range with only doctor-authored events must return 0."""
+        """clear_range on a range with only doctor-authored events deletes nothing.
+
+        Returns {deleted:0, skipped:N} — a zero-Cue-event range must touch
+        nothing on the doctor's calendar.
+        """
         from icalendar import Event
 
         def _make_doctor_event(uid: str) -> MagicMock:
@@ -265,12 +264,15 @@ class TestClearRangeBlastRadius:
 
         with patch("caldav.DAVClient", return_value=mock_client):
             result = await clear_range(
+                "testdoc@medikah.health",
+                "app-passwd-secret",
+                "2026-07-01T00:00:00+00:00",
+                "2026-07-01T23:59:59+00:00",
                 physician_id="test-phys-007",
-                start_iso="2026-07-01T00:00:00+00:00",
-                end_iso="2026-07-01T23:59:59+00:00",
             )
 
         doctor_event.delete.assert_not_called()
-        assert result == 0, (
-            f"clear_range must return 0 when no Cue-managed events exist; got {result}"
+        assert result == {"deleted": 0, "skipped": 1}, (
+            f"clear_range must return {{deleted:0, skipped:1}} when no Cue-managed "
+            f"events exist; got {result}"
         )

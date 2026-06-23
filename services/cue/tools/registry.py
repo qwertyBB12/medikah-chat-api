@@ -84,6 +84,65 @@ NEUTRAL_TOOLS: list[CueNeutralTool] = [
             "required": [],
         },
     ),
+    # ----- Phase 23 HANDS-03/04 (Plan 23-04) — calendar block/clear PROPOSERS -----
+    # D-03: these tools NEVER write. The executor ALWAYS returns ONLY a confirm-card
+    # payload; the human approves in the UI and the route-level confirm-write
+    # endpoint performs the actual mutation. NO physician_id, NO confirmed property.
+    CueNeutralTool(
+        name="calendar_block_time",
+        description=(
+            "PROPOSES blocking a time range on the authenticated physician's calendar. "
+            "This tool NEVER writes — it returns a confirm card for the human to "
+            "approve. The actual block is written only AFTER the physician clicks "
+            "Confirm in the UI (a separate authenticated route). Do NOT claim or "
+            "assume the block is done. "
+            "Never accepts a physician_id or confirmed argument — scope is always the "
+            "authenticated session and confirmation is a UI action."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "start_iso": {
+                    "type": "string",
+                    "description": "ISO 8601 datetime for the block start (UTC).",
+                },
+                "end_iso": {
+                    "type": "string",
+                    "description": "ISO 8601 datetime for the block end (UTC).",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Event title (e.g. 'Blocked by Cue').",
+                },
+            },
+            "required": ["start_iso", "end_iso", "title"],
+        },
+    ),
+    CueNeutralTool(
+        name="calendar_clear_range",
+        description=(
+            "PROPOSES clearing Cue-created blocks in a time range on the authenticated "
+            "physician's calendar. This tool NEVER writes — it returns a confirm card "
+            "for the human to approve. The actual clear runs only AFTER the physician "
+            "clicks Confirm in the UI; it deletes ONLY Cue-created events and never "
+            "the physician's own appointments. Do NOT claim or assume the clear is done. "
+            "Never accepts a physician_id or confirmed argument."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "start_iso": {
+                    "type": "string",
+                    "description": "ISO 8601 datetime for the range start (UTC).",
+                },
+                "end_iso": {
+                    "type": "string",
+                    "description": "ISO 8601 datetime for the range end (UTC).",
+                },
+            },
+            "required": ["start_iso", "end_iso"],
+        },
+    ),
     # ----- Phase 23 HANDS-02/04 (Plan 23-02) — read-only inbox headers -----
     CueNeutralTool(
         name="inbox_read_recent",
@@ -122,8 +181,16 @@ def _safe_tool_input(tool_input: dict) -> dict:
     model can still put any key in tool_input.  We strip identity keys here
     as a defence-in-depth measure so they can never reach an executor via
     **tool_input unpacking — even if a future schema accidentally adds one.
+
+    D-03 defence-in-depth (Plan 23-04): 'confirmed' is ALSO stripped here. The
+    block/clear proposer executors have no write branch and no `confirmed`
+    parameter, so a hallucinated confirmed=true has nowhere to land — but we
+    strip it anyway so a one-shot tool_use can never even appear to authorize a
+    write (the sole mutation path is the route-level confirm-write endpoint).
     """
-    _IDENTITY_KEYS = frozenset({"physician_id", "slug", "doctor_id", "user_id"})
+    _IDENTITY_KEYS = frozenset(
+        {"physician_id", "slug", "doctor_id", "user_id", "confirmed"}
+    )
     return {k: v for k, v in tool_input.items() if k not in _IDENTITY_KEYS}
 
 
@@ -167,6 +234,18 @@ async def dispatch_tool(
         from services.cue.tools.executors import inbox_read_recent
         limit = int(safe_input.get("limit", 10))
         return await inbox_read_recent(physician_id=physician_id, limit=min(limit, 20))
+
+    if tool_name == "calendar_block_time":
+        # Phase 23 HANDS-03/04 — PURE PROPOSER (D-03). Returns ONLY a confirm-card
+        # payload (JSON string); never writes. 'confirmed' is stripped above.
+        from services.cue.tools.executors import calendar_block_time
+        return await calendar_block_time(physician_id=physician_id, **safe_input)
+
+    if tool_name == "calendar_clear_range":
+        # Phase 23 HANDS-03/04 — PURE PROPOSER (D-03). Returns ONLY a confirm-card
+        # payload (JSON string); never writes. 'confirmed' is stripped above.
+        from services.cue.tools.executors import calendar_clear_range
+        return await calendar_clear_range(physician_id=physician_id, **safe_input)
 
     # Unknown tool — raise so the engine returns an is_error tool_result
     raise ValueError(f"Unknown tool: {tool_name!r}")

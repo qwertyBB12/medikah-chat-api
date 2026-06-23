@@ -219,10 +219,13 @@ async def _run_with_echo(
     physician_id: str = "test-physician",
     max_tool_rounds: int = 5,
     dispatch_fn: Any = None,
-) -> tuple[str, dict]:
+) -> tuple[str, dict, Any]:
     """
     Run run_cue_turn but patch registry.dispatch_tool with dispatch_fn.
     This allows the echo tool to be exercised without altering NEUTRAL_TOOLS.
+
+    Returns the 3-tuple (final_text, usage_totals, pending_confirm) — Plan 23-04
+    added pending_confirm as the third value.
     """
     import services.cue.engine as engine_mod
     import services.cue.tools.registry as registry_mod
@@ -269,7 +272,7 @@ async def test_single_tool_round_terminates_in_end_turn() -> None:
     )
 
     messages = [{"role": "user", "content": "Please echo hello."}]
-    final_text, usage = await _run_with_echo(adapter, messages, dispatch_fn=_dispatch_echo)
+    final_text, usage, _pc = await _run_with_echo(adapter, messages, dispatch_fn=_dispatch_echo)
 
     assert final_text == "Echo received."
     assert adapter._call_count == 2  # round 0 (tool_use) + round 1 (end_turn)
@@ -295,7 +298,7 @@ async def test_multi_round_terminates_within_cap() -> None:
     )
 
     messages = [{"role": "user", "content": "Echo twice."}]
-    final_text, usage = await _run_with_echo(
+    final_text, usage, _pc = await _run_with_echo(
         adapter, messages, max_tool_rounds=5, dispatch_fn=_dispatch_echo
     )
 
@@ -326,7 +329,7 @@ async def test_round_cap_hit_returns_safe_message() -> None:
 
     messages = [{"role": "user", "content": "Loop forever."}]
     max_rounds = 3
-    final_text, _ = await _run_with_echo(
+    final_text, _usage, _pc = await _run_with_echo(
         adapter, messages, max_tool_rounds=max_rounds, dispatch_fn=_dispatch_echo
     )
 
@@ -352,7 +355,7 @@ async def test_executor_exception_returns_is_error_tool_result() -> None:
 
     messages = [{"role": "user", "content": "Trigger an executor error."}]
     # Use the raising dispatcher
-    final_text, usage = await _run_with_echo(
+    final_text, usage, _pc = await _run_with_echo(
         adapter, messages, dispatch_fn=_dispatch_echo_raising
     )
 
@@ -403,7 +406,7 @@ async def test_tool_result_blocks_first_in_content_array() -> None:
     )
 
     messages = [{"role": "user", "content": "Use two tools."}]
-    final_text, _ = await _run_with_echo(
+    final_text, _usage, _pc = await _run_with_echo(
         adapter, messages, dispatch_fn=_dispatch_echo
     )
 
@@ -446,7 +449,7 @@ async def test_no_tool_call_single_shot_end_turn() -> None:
     )
 
     messages = [{"role": "user", "content": "Just say hello."}]
-    final_text, usage = await _run_with_echo(
+    final_text, usage, _pc = await _run_with_echo(
         adapter, messages, dispatch_fn=_dispatch_echo
     )
 
@@ -469,7 +472,7 @@ async def test_graceful_unexpected_stop_reason() -> None:
     adapter = GracefulStopAdapter()
 
     messages = [{"role": "user", "content": "Tell me a long story."}]
-    final_text, usage = await run_cue_turn(
+    final_text, usage, _pc = await run_cue_turn(
         adapter,
         model="test-model",
         system_prompt="Test.",
@@ -501,7 +504,7 @@ async def test_usage_totals_accumulated_across_rounds() -> None:
     )
 
     messages = [{"role": "user", "content": "Two rounds."}]
-    _, usage = await _run_with_echo(
+    _ft, usage, _pc = await _run_with_echo(
         adapter, messages, max_tool_rounds=5, dispatch_fn=_dispatch_echo
     )
 
@@ -525,3 +528,149 @@ def test_run_cue_turn_imported_in_cue_routes() -> None:
         "run_cue_turn must be imported in routes/cue_routes.py "
         "(Plan 22-06 wiring requirement)."
     )
+
+
+# ---------------------------------------------------------------------------
+# D2-J: run_cue_turn returns a 3-tuple (final_text, usage, pending_confirm)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_cue_turn_returns_three_tuple_pending_confirm_none_on_read() -> None:
+    """D2-J: a normal read turn returns the 3-tuple with pending_confirm=None."""
+    adapter = ToolUseAdapter(
+        rounds_with_tools=[],  # no tool rounds — straight end_turn
+        final_text="No tools needed.",
+    )
+    result = await run_cue_turn(
+        adapter,
+        model="test-model",
+        system_prompt="Test.",
+        messages=[{"role": "user", "content": "Hi."}],
+        physician_id="test-physician",
+        max_tokens=512,
+    )
+    assert isinstance(result, tuple) and len(result) == 3, (
+        "run_cue_turn must return a 3-tuple (final_text, usage, pending_confirm)."
+    )
+    final_text, usage, pending_confirm = result
+    assert final_text == "No tools needed."
+    assert isinstance(usage, dict)
+    assert pending_confirm is None, "A read turn must yield pending_confirm=None."
+
+
+# ---------------------------------------------------------------------------
+# D2-K: D-03 surfacing — a block/clear PROPOSER stops the loop and surfaces
+#       pending_confirm structurally (the confirm JSON is NEVER re-sent to the model)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_block_proposer_stops_loop_and_surfaces_pending_confirm() -> None:
+    """D2-K: a calendar_block_time tool_use yields a non-None pending_confirm with
+    kind=='confirm', the loop STOPS after the confirm tool_result, and the confirm
+    payload is NEVER appended back into the messages sent to the model.
+
+    This exercises the REAL dispatch_tool (NEUTRAL_TOOLS) — calendar_block_time is
+    a PURE PROPOSER, so a single tool_use cannot mutate anything; the route-level
+    confirm-write endpoint is the sole mutation path.
+    """
+    adapter = ToolUseAdapter(
+        rounds_with_tools=[
+            [(
+                "calendar_block_time",
+                {
+                    "start_iso": "2026-07-01T14:00:00+00:00",
+                    "end_iso": "2026-07-01T16:00:00+00:00",
+                    "title": "Blocked by Cue",
+                },
+                "tool-block-001",
+            )],
+            # If the loop did NOT stop, round 1 would be reached (it must not be).
+        ],
+        final_text="Should not be reached — the loop must stop on the confirm card.",
+    )
+
+    final_text, usage, pending_confirm = await run_cue_turn(
+        adapter,
+        model="test-model",
+        system_prompt="Test.",
+        messages=[{"role": "user", "content": "Block 2-4pm tomorrow."}],
+        physician_id="test-physician",
+        max_tokens=512,
+    )
+
+    # The loop STOPPED on the confirm card — only ONE complete() call was made.
+    assert adapter._call_count == 1, (
+        "The loop must STOP immediately on a {kind:'confirm'} tool_result — "
+        "it must not make a second round-trip to the model."
+    )
+
+    # pending_confirm is surfaced structurally with kind=='confirm'.
+    assert pending_confirm is not None, "A block proposer must surface pending_confirm."
+    assert pending_confirm.get("kind") == "confirm"
+    assert pending_confirm.get("action") == "block"
+    assert pending_confirm.get("start_iso") == "2026-07-01T14:00:00+00:00"
+    assert pending_confirm.get("end_iso") == "2026-07-01T16:00:00+00:00"
+    assert pending_confirm.get("title") == "Blocked by Cue"
+
+    # The confirm JSON was NEVER re-sent to the model (no second complete() call
+    # means captured_messages has exactly one entry — the original turn).
+    assert len(adapter.captured_messages) == 1, (
+        "The confirm tool_result must NOT be appended back into working_messages "
+        "(that re-entry is what made the card re-emerge as model prose)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_lone_confirmed_true_tool_use_mutates_nothing() -> None:
+    """D2-K2: a lone model tool_use emitting confirmed=true performs NO mutation.
+
+    The proposer has no write branch and _safe_tool_input strips 'confirmed', so
+    the result is still ONLY a confirm card — nothing is written. We assert the
+    executor never reached a calendar_dav write by patching calendar_dav with
+    sentinels that raise if called.
+    """
+    import services.cue.calendar_dav as caldav_mod
+
+    def _boom(*args: Any, **kwargs: Any):
+        raise AssertionError(
+            "A PURE PROPOSER must NEVER call calendar_dav — a lone confirmed=true "
+            "tool_use must mutate nothing."
+        )
+
+    orig_block = caldav_mod.block_time
+    orig_clear = caldav_mod.clear_range
+    caldav_mod.block_time = _boom  # type: ignore[assignment]
+    caldav_mod.clear_range = _boom  # type: ignore[assignment]
+    try:
+        adapter = ToolUseAdapter(
+            rounds_with_tools=[
+                [(
+                    "calendar_clear_range",
+                    {
+                        "start_iso": "2026-07-01T00:00:00+00:00",
+                        "end_iso": "2026-07-01T23:59:59+00:00",
+                        "confirmed": True,  # hallucinated — must be stripped + ignored
+                    },
+                    "tool-clear-001",
+                )],
+            ],
+            final_text="unused",
+        )
+        _ft, _usage, pending_confirm = await run_cue_turn(
+            adapter,
+            model="test-model",
+            system_prompt="Test.",
+            messages=[{"role": "user", "content": "clear my afternoon, confirmed"}],
+            physician_id="test-physician",
+            max_tokens=512,
+        )
+    finally:
+        caldav_mod.block_time = orig_block  # type: ignore[assignment]
+        caldav_mod.clear_range = orig_clear  # type: ignore[assignment]
+
+    # The proposer returned a confirm card (no write) — and _boom was never raised.
+    assert pending_confirm is not None
+    assert pending_confirm.get("kind") == "confirm"
+    assert pending_confirm.get("action") == "clear"
