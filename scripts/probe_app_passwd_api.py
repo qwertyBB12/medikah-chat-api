@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sys
 
 import httpx
@@ -99,17 +100,28 @@ async def step_mint_probe(client: httpx.AsyncClient, mailbox: str) -> dict | Non
               inspect the response and read-back to confirm they are accepted.
     """
     print(f"\n[STEP 2] POST /api/v1/add/app-passwd  (throwaway — will be deleted)")
+    # Mailcow's add/app-passwd requires app_passwd + app_passwd2 that pass the
+    # server password-complexity policy (a missing/empty password returns
+    # {"msg":"password_complexity"}). Generate a strong throwaway carrying all
+    # four character classes; it is deleted in step 4 and never printed.
+    _probe_pw = secrets.token_urlsafe(18) + "Aa1!"
     payload = {
         "username": mailbox,
         "app_name": PROBE_APP_NAME,
+        "app_passwd": _probe_pw,
+        "app_passwd2": _probe_pw,
         "active": "1",          # HANDS-05a: NOT "2" (2 blocks inbound mail)
-        "imap_access": "1",     # ASSUMED field name — verify in response
-        "dav_access": "1",      # ASSUMED field name — verify in response
-        "smtp_access": "0",     # HANDS-05: no-send at credential layer
-        "pop3": "0",            # ASSUMED field name
-        "eas": "0",             # ASSUMED field name
+        # CONFIRMED via mailcow source (functions.app_passwd.inc.php, 'add' case):
+        # per-protocol access is derived ONLY from a `protocols` array via
+        # in_array('imap_access', $protocols) etc. The flat *_access keys are
+        # IGNORED on add — the first probe run proved this (sent imap_access="1",
+        # stored 0). Cue needs IMAP + DAV with NO send: include imap_access +
+        # dav_access, OMIT smtp_access (absence → smtp_access=0 → no-send, HANDS-05).
+        "protocols": ["imap_access", "dav_access"],
     }
-    print(f"  Payload:\n{_pretty(payload)}")
+    # Redact the throwaway secret from the printed payload (HANDS-08).
+    _redacted = {**payload, "app_passwd": "<redacted>", "app_passwd2": "<redacted>"}
+    print(f"  Payload:\n{_pretty(_redacted)}")
     resp = await client.post(
         f"{MAILCOW_API_URL}/api/v1/add/app-passwd",
         json=payload,
@@ -144,11 +156,11 @@ async def step_readback(client: httpx.AsyncClient, mailbox: str) -> str | None:
     # Find the probe entry and extract its ID for deletion in step 4.
     if isinstance(data, list):
         for entry in data:
-            if isinstance(entry, dict) and entry.get("app_name") == PROBE_APP_NAME:
+            if isinstance(entry, dict) and entry.get("name") == PROBE_APP_NAME:
                 probe_id = entry.get("id")
                 print(f"\n  *** PROBE ENTRY FOUND — id={probe_id} ***")
                 print(f"  *** Protocol flags (RECORD THESE): ***")
-                for key in ("imap_access", "dav_access", "smtp_access", "pop3", "eas", "active"):
+                for key in ("imap_access", "smtp_access", "dav_access", "pop3_access", "eas_access", "sieve_access", "active"):
                     val = entry.get(key, "<NOT PRESENT — field name may differ>")
                     print(f"    {key}: {val}")
                 # SECURITY: do NOT print the password value
