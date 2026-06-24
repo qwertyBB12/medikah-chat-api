@@ -4,7 +4,42 @@ The greeting is a brain turn (compass-aware, clinical register), addressing the
 doctor by honorific from physician_workspace_accounts.title with a name-only
 fallback when title IS NULL.
 """
-from routes.cue_routes import _resolve_doctor_address
+import asyncio
+
+from routes.cue_routes import _resolve_doctor_address, _build_system_prompt
+
+
+# ---------------------------------------------------------------------------
+# Regression: _build_system_prompt must use the REAL assembled clinical prompt,
+# NOT the emergency fallback. The route used to call `await assemble(...,
+# physician_id=..., supabase=...)` — but assemble() is SYNC and takes neither
+# arg, so it raised TypeError on EVERY turn and Cue ran on the generic English
+# fallback (English-only, said "How can I help?" which the core forbids).
+# ---------------------------------------------------------------------------
+
+
+def _build(locale: str) -> str:
+    return asyncio.run(_build_system_prompt("phys-test", locale, None))
+
+
+def test_system_prompt_is_real_not_fallback_es():
+    prompt = _build("es")
+    # The fallback is a ~4-line string; the real assembled prompt is ~20k chars.
+    assert len(prompt) > 2000, "ES prompt fell back to the tiny emergency prompt"
+    assert "Eres Cue, un asistente de apoyo clínico para el médico autenticado." not in prompt
+
+
+def test_system_prompt_is_real_not_fallback_en():
+    prompt = _build("en")
+    assert len(prompt) > 2000, "EN prompt fell back to the tiny emergency prompt"
+    assert "You are Cue, a clinical decision-support assistant for the authenticated physician." not in prompt
+
+
+def test_system_prompt_language_directive_is_bilingual():
+    # Cue mirrors the doctor's language (EN+ES), not locked to one locale.
+    prompt = _build("es")
+    assert "SAME language the doctor uses" in prompt
+    assert "Respond ONLY IN SPANISH" not in prompt  # the old locale-lock is gone
 
 
 class _Resp:
