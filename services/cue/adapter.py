@@ -146,6 +146,56 @@ class CueModelAdapter(ABC):
         """
         ...  # pragma: no cover
 
+    async def stream_turn(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        messages: list[dict],
+        tools: list[CueNeutralTool] | None = None,
+        max_tokens: int = 1024,
+        system_cache_strategy: SystemCacheStrategy = None,
+    ) -> AsyncIterator[dict]:
+        """
+        Stream ONE model turn, yielding neutral events (CUE-03 TTFT path).
+
+        Yields, in order:
+          • zero or more {"type": "text", "text": <delta>} — text deltas as the
+            model generates them (Time-To-First-Token streaming)
+          • exactly one {"type": "message", "stop_reason": str, "content": list,
+            "usage": {"input_tokens": int, "output_tokens": int}} — the terminal
+            message, carrying the tool_use/stop_reason/usage the engine inspects
+
+        This is the single primitive the engine's tool loop drives: it gives BOTH
+        live text deltas AND the full final message (incl. tool_use blocks +
+        usage) from a single model call — no double round-trip (the deferred
+        Phase-23 TTFT optimization, done correctly).
+
+        DEFAULT (this method): a non-streaming fallback built on complete() — it
+        completes the turn, surfaces the assembled text as a single delta, then
+        the message event. Adapters with true token streaming (AnthropicAdapter)
+        OVERRIDE this. Keeping a working default means every existing adapter /
+        test double gets stream_turn for free with identical loop semantics.
+        """
+        response = await self.complete(
+            model=model,
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            system_cache_strategy=system_cache_strategy,
+        )
+        stop_reason, content, usage = _coerce_response_fields(response)
+        text = _coerce_text(content)
+        if text:
+            yield {"type": "text", "text": text}
+        yield {
+            "type": "message",
+            "stop_reason": stop_reason,
+            "content": content,
+            "usage": usage,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Anthropic adapter (the only concrete adapter in Phase 22)
@@ -246,6 +296,57 @@ class AnthropicAdapter(CueModelAdapter):
             async for text in stream.text_stream:
                 yield text
 
+    async def stream_turn(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        messages: list[dict],
+        tools: list[CueNeutralTool] | None = None,
+        max_tokens: int = 1024,
+        system_cache_strategy: SystemCacheStrategy = None,
+    ) -> AsyncIterator[dict]:
+        """
+        True token-streaming turn (CUE-03 TTFT). Overrides the ABC default.
+
+        Uses the SDK `.messages.stream()` helper, which surfaces BOTH the live
+        text deltas (`stream.text_stream`) AND the fully-assembled terminal
+        message (`get_final_message()` — incl. tool_use blocks + usage). This is
+        why streaming the FINAL turn no longer needs a second model call: one
+        stream yields the user-facing deltas while still letting the engine
+        inspect stop_reason/tool_use afterwards (AI-SPEC §4b.2, done right).
+
+        Yields {"type":"text", ...} deltas, then one {"type":"message", ...}.
+        """
+        system = self._build_system_param(system_prompt, system_cache_strategy)
+        sdk_tools = self._translate_tools(tools)
+
+        kwargs: dict[str, Any] = dict(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+        )
+        if sdk_tools:
+            kwargs["tools"] = sdk_tools
+
+        async with self._client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if text:
+                    yield {"type": "text", "text": text}
+            final = await stream.get_final_message()
+
+        usage = getattr(final, "usage", None)
+        yield {
+            "type": "message",
+            "stop_reason": getattr(final, "stop_reason", "end_turn") or "end_turn",
+            "content": getattr(final, "content", []) or [],
+            "usage": {
+                "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
+                "output_tokens": getattr(usage, "output_tokens", 0) if usage else 0,
+            },
+        }
+
     async def complete(
         self,
         *,
@@ -280,6 +381,48 @@ class AnthropicAdapter(CueModelAdapter):
             kwargs["tools"] = sdk_tools
 
         return await self._client.messages.create(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Duck-typed response coercion for the default stream_turn() fallback
+# ---------------------------------------------------------------------------
+# These mirror the engine's duck-typed accessors but live here so the ABC's
+# default stream_turn() (the non-streaming complete()-wrapper) stays
+# self-contained — engine.py imports adapter.py, so adapter.py must not import
+# engine.py (no circular import). Used ONLY by the default fallback; the real
+# AnthropicAdapter.stream_turn() override never touches these.
+
+
+def _coerce_response_fields(response: Any) -> tuple[str, list[Any], dict[str, int]]:
+    """Extract (stop_reason, content, usage) from a dict OR SDK Message."""
+    if isinstance(response, dict):
+        stop_reason = response.get("stop_reason", "end_turn") or "end_turn"
+        content = response.get("content", []) or []
+        usage = response.get("usage", {}) or {}
+        usage_dict = {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        }
+        return stop_reason, content, usage_dict
+    stop_reason = getattr(response, "stop_reason", "end_turn") or "end_turn"
+    content = getattr(response, "content", []) or []
+    usage_obj = getattr(response, "usage", None)
+    usage_dict = {
+        "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
+        "output_tokens": getattr(usage_obj, "output_tokens", 0) if usage_obj else 0,
+    }
+    return stop_reason, content, usage_dict
+
+
+def _coerce_text(content: list[Any]) -> str:
+    """Concatenate all text blocks from a content list (dict or SDK block)."""
+    parts: list[str] = []
+    for block in content:
+        btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", "")
+        if btype == "text":
+            text = (block.get("text") if isinstance(block, dict) else getattr(block, "text", "")) or ""
+            parts.append(text)
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
