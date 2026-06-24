@@ -81,17 +81,26 @@ async def _decode_and_lookup(
     if supabase is None:
         raise HTTPException(status_code=503, detail="Database not configured")
 
-    # 8. Find the physician row owned by this auth user
+    # 8. Find the physician row. Prefer the canonical `physician_id` claim (the
+    #    same key Fix A uses on the frontend); fall back to auth_user_id for
+    #    tokens that predate the claim. Both are session-derived (signed), so
+    #    resolving by either is CUE-11-safe. A mailcow-imap workspace login may
+    #    have an unlinked/mismatched auth_user_id → the auth_user_id-only lookup
+    #    404'd that physician with 403 "No physician profile linked".
+    physician_id_claim = claims.get("physician_id")
     try:
-        result = (
-            supabase.table("physicians")
-            .select("id, email, verification_status")
-            .eq("auth_user_id", user_id)
-            .limit(1)
-            .execute()
-        )
+        query = supabase.table("physicians").select("id, email, verification_status")
+        if physician_id_claim:
+            query = query.eq("id", physician_id_claim)
+        else:
+            query = query.eq("auth_user_id", user_id)
+        result = query.limit(1).execute()
     except Exception:
-        logger.exception("Failed to look up physician row for auth_user_id=%s", user_id)
+        logger.exception(
+            "Failed to look up physician row (physician_id=%s auth_user_id=%s)",
+            physician_id_claim,
+            user_id,
+        )
         raise HTTPException(status_code=500, detail="Unable to verify physician access")
 
     if not result.data:
