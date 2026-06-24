@@ -126,6 +126,7 @@ class CueChatRequest(BaseModel):
     locale: str = "es"         # "en" | "es" — physicians are Spanish-first
     context: str = "workspace" # surface hint for system-prompt builder
     max_tokens: int = 1024     # AI-SPEC §4b.3: max_tokens MANDATORY, explicit limit
+    opening: bool = False      # Phase 23: brain-generated open-greeting turn
 
 
 class CueConfirmWriteRequest(BaseModel):
@@ -309,8 +310,29 @@ async def cue_chat(
     captured: list[str] = []
     usage_totals: dict = {"input_tokens": 0, "output_tokens": 0}
 
-    # Truncate history to last 10 turns (AI-SPEC §4 context strategy).
-    messages = body.messages[-_MAX_MESSAGES:]
+    # Phase 23: opening-turn greeting (brain turn, brevity-default, doctor-centric).
+    # The directive is the user turn; the clinical register + compass live in
+    # system_prompt. A greeting never proposes a write → no pending_confirm.
+    if body.opening:
+        address = _resolve_doctor_address(supabase, physician_id)
+        if body.locale == "es":
+            directive = (
+                "El médico acaba de abrir el espacio de Cue. Salúdalo en UNA sola frase "
+                "breve, liderando con lo útil. " +
+                (f"Dirígete a él o ella como «{address}». " if address else "") +
+                "No enumeres funciones. Sin signos de exclamación."
+            )
+        else:
+            directive = (
+                "The physician just opened the Cue workspace. Greet them in ONE short "
+                "sentence, leading with the useful thing. " +
+                (f"Address them as \"{address}\". " if address else "") +
+                "Do not list capabilities. No exclamation marks."
+            )
+        messages = [{"role": "user", "content": directive}]
+    else:
+        # Truncate history to last 10 turns (AI-SPEC §4 context strategy).
+        messages = body.messages[-_MAX_MESSAGES:]
 
     async def _token_gen() -> AsyncIterator[bytes]:
         """
@@ -838,6 +860,36 @@ async def cue_health() -> dict:
 # ---------------------------------------------------------------------------
 # Context assembly helper (Phase 22 — calls Plan 22-03 assemble())
 # ---------------------------------------------------------------------------
+
+
+def _resolve_doctor_address(supabase, physician_id: str) -> str:
+    """Return the spoken address: "Doctor X" / "Doctora X" / last-or-first name / "".
+
+    Honorific from physician_workspace_accounts.title (Dr/Dra/NULL); name from
+    physicians.full_name. NULL title or no record → name-only fallback (never
+    mis-title). All reads scoped to the session-derived physician_id (CUE-11).
+    """
+    if supabase is None:
+        return ""
+    try:
+        wa = (
+            supabase.table("physician_workspace_accounts")
+            .select("title").eq("physician_id", physician_id).limit(1).execute()
+        )
+        title = (wa.data[0].get("title") if getattr(wa, "data", None) else None)
+        ph = (
+            supabase.table("physicians")
+            .select("full_name").eq("id", physician_id).limit(1).execute()
+        )
+        full_name = ((ph.data[0].get("full_name") if getattr(ph, "data", None) else "") or "").strip()
+        last = full_name.split()[-1] if full_name else ""
+        honorific = {"Dr": "Doctor", "Dra": "Doctora"}.get(title or "", "")
+        if honorific and last:
+            return f"{honorific} {last}"
+        return last  # name-only fallback (may be "")
+    except Exception:
+        logger.exception("[cue] address resolve failed physician=%s", physician_id)
+        return ""
 
 
 async def _build_system_prompt(
