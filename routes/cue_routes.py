@@ -42,13 +42,16 @@ CUE-11 — physician_id discipline:
   It is NEVER read from the request body or any tool argument.
   All Supabase reads are scoped to this session-derived id.
 
-Plan 22-06 — tool loop:
-  The single-shot adapter.stream() (Plan 05) is replaced by run_cue_turn()
-  (services/cue/engine.py), which drives the multi-step tool_use/tool_result
-  loop.  After run_cue_turn() returns the assembled final_text, the route
-  streams it to the client as a StreamingResponse (AI-SPEC §4b.2 pattern).
-  Real usage counts (from the non-streaming loop path) are recorded on the
-  background task.
+Plan 22-06 — tool loop / Phase-23 — TTFT streaming:
+  run_cue_turn_streaming() (services/cue/engine.py) drives the multi-step
+  tool_use/tool_result loop, but each round is a single adapter.stream_turn()
+  call that yields live text deltas AND the terminal message (tool_use + usage).
+  The route forwards each delta to the client immediately as a StreamingResponse
+  (AI-SPEC §4b.2) — so Cue starts speaking sentence 1 while the rest is still
+  generating, with NO second model round-trip. The opening greeting bypasses the
+  loop entirely (adapter.stream(), no tools). Real usage counts (from the
+  terminal `done` event) are recorded on the background task; the greeting path
+  falls back to the char-length approximation.
 """
 
 from __future__ import annotations
@@ -65,7 +68,7 @@ from slowapi import Limiter
 
 from db.client import get_supabase
 from services.cue.adapter import create_adapter, select_model
-from services.cue.engine import run_cue_turn
+from services.cue.engine import run_cue_turn, run_cue_turn_streaming
 from services.cue.gate import (
     BudgetStatus,
     KillSwitchResult,
@@ -300,11 +303,14 @@ async def cue_chat(
     model = select_model(tier="sonnet")  # AI-SPEC §4 default reasoning brain
 
     # ------------------------------------------------------------------
-    # Tool loop + stream — Plan 22-06 (CUE-03)
-    # run_cue_turn drives the tool_use/tool_result loop via adapter.complete()
-    # for tool-detection rounds (tool_use blocks are NOT in the delta stream),
-    # then returns the assembled final_text.  The route streams that text to
-    # the client as a StreamingResponse (AI-SPEC §4b.2).
+    # Tool loop + stream — Plan 22-06 (CUE-03) + Phase-23 TTFT streaming
+    # run_cue_turn_streaming drives the tool_use/tool_result loop via
+    # adapter.stream_turn() — a single streamed model call per round that yields
+    # live text deltas AND the terminal message (tool_use + usage). The route
+    # forwards each delta to the client immediately (Time-To-First-Token), so Cue
+    # starts speaking sentence 1 while the rest is still generating, instead of
+    # waiting for the whole loop to assemble. No second model round-trip (the
+    # double-call trap is avoided — see services/cue/engine.py).
     # ------------------------------------------------------------------
     adapter = create_adapter("anthropic")
     captured: list[str] = []
@@ -336,28 +342,54 @@ async def cue_chat(
 
     async def _token_gen() -> AsyncIterator[bytes]:
         """
-        Run the tool loop and stream the assembled final_text to the client.
+        Stream Cue's reply to the client token-by-token (Phase-23 TTFT).
 
-        run_cue_turn() drives all tool_use/tool_result rounds (each using
-        adapter.complete()), then returns the final assembled text.  We then
-        yield the final text as a stream (AI-SPEC §4b.2 UX pattern).
+        Opening greeting (body.opening): bypasses the tool loop entirely and
+        streams adapter.stream() directly — a greeting never proposes a write and
+        never calls a tool, so there is no tool-detection round to pay for. This
+        is the biggest, lowest-risk latency win (the first thing every session
+        speaks). Usage falls back to the char-length approximation below.
 
-        The real TTFT optimization (calling adapter.stream() on the last turn
-        when no tools were used) is a Phase-23 enhancement; Phase 22 streams
-        the pre-assembled text directly.
+        Conversational turn: consumes run_cue_turn_streaming(), forwarding each
+        `delta` event to the client as it arrives (so streamingTts can start
+        speaking sentence 1 while the rest generates), then emitting the D-03
+        confirm sentinel from the terminal `done` event when present.
         """
         nonlocal usage_totals
         try:
-            final_text, usage_totals, pending_confirm = await run_cue_turn(
+            # ----- Opening greeting: direct stream, no tool loop -----
+            if body.opening:
+                async for delta in adapter.stream(
+                    model=model,
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    max_tokens=body.max_tokens,
+                ):
+                    if delta:
+                        captured.append(delta)
+                        yield delta.encode("utf-8")
+                return
+
+            # ----- Conversational turn: stream the tool loop's deltas -----
+            pending_confirm: Optional[dict] = None
+            async for ev in run_cue_turn_streaming(
                 adapter,
                 model=model,
                 system_prompt=system_prompt,
                 messages=messages,
                 physician_id=physician_id,
                 max_tokens=body.max_tokens,
-            )
-            captured.append(final_text)
-            yield final_text.encode("utf-8")
+            ):
+                etype = ev.get("type")
+                if etype == "delta":
+                    delta = ev.get("text", "")
+                    if delta:
+                        captured.append(delta)
+                        yield delta.encode("utf-8")
+                elif etype == "done":
+                    usage_totals = ev.get("usage", usage_totals)
+                    pending_confirm = ev.get("pending_confirm")
+
             # D-03 surfacing (Plan 23-04): when a block/clear PROPOSER produced a
             # confirm card, emit it AFTER the text as ONE structured sentinel line:
             #   \x1e (RS) + compact JSON {"pending_confirm": {...}} + \n
@@ -374,11 +406,15 @@ async def cue_chat(
             logger.error(
                 "[cue] run_cue_turn error for physician=%s: %s", physician_id, exc
             )
-            # Surface a minimal error string rather than crashing the generator.
+            # Headers are already on the wire (StreamingResponse defaults to 200),
+            # so we cannot fail the status here. Degrade gracefully by streaming a
+            # CLEAN spoken message (no brackets/newline — it is read aloud by the
+            # voice surface, so it must sound like a sentence). A leading space
+            # separates it cleanly if any partial text was already streamed.
             error_chunk = (
-                "\n[Cue no pudo completar la respuesta. Intenta de nuevo.]"
+                " Cue no pudo completar la respuesta. Intenta de nuevo."
                 if body.locale == "es"
-                else "\n[Cue could not complete the response. Please try again.]"
+                else " Cue could not complete the response. Please try again."
             )
             captured.append(error_chunk)
             yield error_chunk.encode("utf-8")

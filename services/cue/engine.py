@@ -63,7 +63,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from services.cue.adapter import CueModelAdapter, CueNeutralTool
 from services.cue.tools.registry import NEUTRAL_TOOLS, dispatch_tool
@@ -82,7 +82,7 @@ _ROUND_CAP_MESSAGE = "[Cue reached the tool-call limit for this turn.]"
 # ---------------------------------------------------------------------------
 
 
-async def run_cue_turn(
+async def run_cue_turn_streaming(
     adapter: CueModelAdapter,
     *,
     model: str,
@@ -91,40 +91,41 @@ async def run_cue_turn(
     physician_id: str,               # from verified session — NEVER from tool args (CUE-11)
     max_tokens: int = 1024,
     max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
-) -> tuple[str, dict, Optional[dict]]:
+    tools: Optional[list[CueNeutralTool]] = None,
+) -> AsyncIterator[dict]:
     """
-    Drive the tool_use / tool_result agentic loop.
+    Drive the tool_use / tool_result agentic loop, STREAMING text deltas (CUE-03
+    TTFT). This is the Phase-23 TTFT optimization done correctly: each round is a
+    single `adapter.stream_turn()` call that yields live text deltas AND the full
+    terminal message (incl. tool_use + usage) — so the final turn streams with NO
+    second model round-trip (the double-call trap the naive "re-stream
+    final_messages" approach would have hit).
 
-    Parameters
-    ----------
-    adapter        : Any CueModelAdapter implementation (AnthropicAdapter in P22).
-    model          : Dated model ID string (from select_model()).
-    system_prompt  : Pre-assembled clinical system prompt (from assemble()).
-    messages       : Conversation history (last 10 turns, per context strategy).
-    physician_id   : Verified physician ID from the FastAPI auth dependency.
-                     NEVER passed as a tool argument — CUE-11 IDOR guard.
-    max_tokens     : Max output tokens for each round (default 1024 for reasoning
-                     turns; tool-detection turns use 2048 per AI-SPEC §4b.3).
-    max_tool_rounds: Safety cap on the number of tool-call rounds per turn
-                     (default 5 — AI-SPEC §6 guardrail).
+    Parameters mirror the legacy run_cue_turn(), plus:
+    tools : the tool set offered to the model. Defaults to NEUTRAL_TOOLS. Pass an
+            empty list to DISABLE tools entirely (the opening greeting never
+            proposes a write, so it streams tool-free).
 
-    Returns
-    -------
-    (final_text: str, usage_totals: dict, pending_confirm: dict | None)
-        final_text      — the assembled text of the terminal response (or the
-                          best-available text when a confirm card stops the loop).
-        usage_totals    — accumulated {"input_tokens": int, "output_tokens": int}
-                          across all rounds (for record_usage on the background path).
-        pending_confirm — the {kind:'confirm', ...} payload from a block/clear
-                          proposer tool_result that STOPPED the loop, else None
-                          (D-03 surfacing — Plan 23-04). When None, behavior is
-                          identical to Phase 22.
+    Yields
+    ------
+    {"type": "delta", "text": str}
+        A user-facing text delta, as the model generates it. The route forwards
+        these to the client immediately (TTFT) and accumulates them for the judge.
+    {"type": "done", "final_text": str, "usage": dict, "pending_confirm": dict|None}
+        Exactly once, terminal. final_text is the assembled terminal text (== the
+        concatenation of the streamed deltas in the common case); usage is the
+        accumulated {"input_tokens","output_tokens"} across all rounds; and
+        pending_confirm carries the D-03 {kind:'confirm', ...} payload when a
+        block/clear PROPOSER stopped the loop (else None).
 
-    The caller streams final_text to the client via adapter.stream() for UX
-    (AI-SPEC §4b.2 pattern: complete() for tool-detection turns,
-    stream() for the final text-only turn) and emits pending_confirm as the
-    structured `\x1e` sentinel line when non-None.
+    D-03 / voice-parity note: every text delta the model emits is streamed live
+    (including any short lead-in on a write-proposer turn). The actual calendar
+    mutation NEVER happens here — block/clear tools are PURE PROPOSERS and the
+    sole write path is the explicit /cue/calendar/confirm-write endpoint (the
+    doctor's Confirm tap). On a pending_confirm, the client stops TTS on the
+    sentinel and speaks a controlled, templated proposal line.
     """
+    active_tools = NEUTRAL_TOOLS if tools is None else tools
     usage_totals: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
     working_messages: list[dict] = list(messages)
 
@@ -136,41 +137,68 @@ async def run_cue_turn(
             physician_id,
         )
 
-        # Non-streaming complete() — required to detect tool_use blocks.
-        # tool_use blocks do NOT appear in the delta stream (AI-SPEC §3 Pitfall #4).
-        # Use a higher max_tokens for tool-detection rounds (tools may emit
-        # structured reasoning before the tool_use block — AI-SPEC §4b.3).
+        # ONE streaming model call per round. stream_turn yields live text deltas
+        # AND the terminal message (with tool_use blocks + usage) — so we get TTFT
+        # while still being able to inspect tool_use afterwards (AI-SPEC §3
+        # Pitfall #4 is satisfied: tool_use is read from the final message, not
+        # from the delta stream). Higher max_tokens for tool-detection rounds
+        # (tools may emit structured reasoning — AI-SPEC §4b.3).
         tool_detection_max_tokens = max(max_tokens, 2048)
 
-        response: Any = await adapter.complete(
+        round_text_parts: list[str] = []
+        message_event: Optional[dict] = None
+        async for ev in adapter.stream_turn(
             model=model,
             system_prompt=system_prompt,
             messages=working_messages,
-            tools=NEUTRAL_TOOLS,
+            tools=active_tools,
             max_tokens=tool_detection_max_tokens,
-        )
+        ):
+            etype = ev.get("type")
+            if etype == "text":
+                delta = ev.get("text", "")
+                if delta:
+                    round_text_parts.append(delta)
+                    yield {"type": "delta", "text": delta}
+            elif etype == "message":
+                message_event = ev
 
-        # Accumulate usage (duck-typed — works for both AnthropicAdapter
-        # response and DummyAdapter dict — CUE-02 provider neutrality).
-        usage = _get_usage(response)
+        # Defensive: a well-behaved stream_turn always yields a terminal message.
+        if message_event is None:
+            yield {
+                "type": "done",
+                "final_text": "".join(round_text_parts),
+                "usage": usage_totals,
+                "pending_confirm": None,
+            }
+            return
+
+        # Accumulate usage (stream_turn normalizes to a dict — CUE-02 neutrality).
+        usage = message_event.get("usage", {}) or {}
         usage_totals["input_tokens"] += usage.get("input_tokens", 0)
         usage_totals["output_tokens"] += usage.get("output_tokens", 0)
 
-        stop_reason: str = _get_stop_reason(response)
-        content: list[Any] = _get_content(response)
+        stop_reason: str = message_event.get("stop_reason", "end_turn") or "end_turn"
+        content: list[Any] = message_event.get("content", []) or []
 
         # ------------------------------------------------------------------
         # TERMINAL: end_turn — no more tool calls
         # ------------------------------------------------------------------
         if stop_reason == "end_turn":
-            final_text = _assemble_text(content)
+            final_text = _assemble_text(content) or "".join(round_text_parts)
             logger.debug(
                 "[cue:engine] end_turn after %d round(s) physician=%s chars=%d",
                 round_idx + 1,
                 physician_id,
                 len(final_text),
             )
-            return final_text, usage_totals, None
+            yield {
+                "type": "done",
+                "final_text": final_text,
+                "usage": usage_totals,
+                "pending_confirm": None,
+            }
+            return
 
         # ------------------------------------------------------------------
         # GRACEFUL: unexpected stop_reason (e.g. "max_tokens", "stop_sequence")
@@ -182,8 +210,14 @@ async def run_cue_turn(
                 round_idx + 1,
                 physician_id,
             )
-            final_text = _assemble_text(content)
-            return final_text, usage_totals, None
+            final_text = _assemble_text(content) or "".join(round_text_parts)
+            yield {
+                "type": "done",
+                "final_text": final_text,
+                "usage": usage_totals,
+                "pending_confirm": None,
+            }
+            return
 
         # ------------------------------------------------------------------
         # TOOL USE: execute each tool_use block and build tool_result replies
@@ -199,7 +233,8 @@ async def run_cue_turn(
         # 2. Execute each tool — scope is ALWAYS auth.physician_id (CUE-11).
         tool_results: list[dict] = []
         pending_confirm: Optional[dict] = None
-        assistant_text = _assemble_text(content)  # best-available text for D-03 stop
+        # best-available text for D-03 stop (== the streamed deltas this round).
+        assistant_text = _assemble_text(content) or "".join(round_text_parts)
         for block in content:
             block_type = _get_block_type(block)
             if block_type != "tool_use":
@@ -260,7 +295,13 @@ async def run_cue_turn(
         #     pending_confirm WITHOUT appending the confirm tool_result back into
         #     working_messages (no model re-entry → it can never re-emerge as prose).
         if pending_confirm is not None:
-            return assistant_text, usage_totals, pending_confirm
+            yield {
+                "type": "done",
+                "final_text": assistant_text,
+                "usage": usage_totals,
+                "pending_confirm": pending_confirm,
+            }
+            return
 
         # 3. tool_result blocks MUST come FIRST in the content array
         #    (AI-SPEC §3 Pitfall #3 — Anthropic hard API requirement).
@@ -276,7 +317,56 @@ async def run_cue_turn(
     logger.warning(
         "[cue:engine] round cap (%d) reached physician=%s", max_tool_rounds, physician_id
     )
-    return _ROUND_CAP_MESSAGE, usage_totals, None
+    yield {
+        "type": "done",
+        "final_text": _ROUND_CAP_MESSAGE,
+        "usage": usage_totals,
+        "pending_confirm": None,
+    }
+
+
+async def run_cue_turn(
+    adapter: CueModelAdapter,
+    *,
+    model: str,
+    system_prompt: str,
+    messages: list[dict],
+    physician_id: str,               # from verified session — NEVER from tool args (CUE-11)
+    max_tokens: int = 1024,
+    max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
+) -> tuple[str, dict, Optional[dict]]:
+    """
+    Non-streaming wrapper over run_cue_turn_streaming() — preserves the original
+    Phase-22 return contract for callers/tests that want the assembled result.
+
+    Returns
+    -------
+    (final_text: str, usage_totals: dict, pending_confirm: dict | None)
+        Identical semantics to the pre-streaming implementation: the assembled
+        terminal text (or proposer text when a confirm card stops the loop), the
+        accumulated usage, and the D-03 pending_confirm payload (else None).
+
+    The streaming caller (cue_routes.py) consumes run_cue_turn_streaming()
+    directly to forward `delta` events to the client as they arrive; this wrapper
+    simply drains the same generator and returns the terminal `done` event.
+    """
+    final_text = ""
+    usage_totals: dict = {"input_tokens": 0, "output_tokens": 0}
+    pending_confirm: Optional[dict] = None
+    async for ev in run_cue_turn_streaming(
+        adapter,
+        model=model,
+        system_prompt=system_prompt,
+        messages=messages,
+        physician_id=physician_id,
+        max_tokens=max_tokens,
+        max_tool_rounds=max_tool_rounds,
+    ):
+        if ev.get("type") == "done":
+            final_text = ev.get("final_text", "")
+            usage_totals = ev.get("usage", usage_totals)
+            pending_confirm = ev.get("pending_confirm")
+    return final_text, usage_totals, pending_confirm
 
 
 def _try_parse_confirm(result_text: Any) -> Optional[dict]:
