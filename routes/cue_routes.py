@@ -59,6 +59,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -300,7 +301,11 @@ async def cue_chat(
     # ------------------------------------------------------------------
     # GATE 6: Model selection (tier-gated; physicians never charged)
     # ------------------------------------------------------------------
-    model = select_model(tier="sonnet")  # AI-SPEC §4 default reasoning brain
+    # Workspace chat uses the FAST brain (Haiku) for BeNeXT-parity latency — the
+    # companion engine BeNeXT ships on Haiku too. The clinical-deference anchor is
+    # baked into the core prompt regardless of model, so scope-of-practice holds.
+    # The high-stakes diagnosis surface (Phase 24) selects sonnet/opus via tier.
+    model = select_model(tier="haiku")
 
     # ------------------------------------------------------------------
     # Tool loop + stream — Plan 22-06 (CUE-03) + Phase-23 TTFT streaming
@@ -356,6 +361,20 @@ async def cue_chat(
         confirm sentinel from the terminal `done` event when present.
         """
         nonlocal usage_totals
+        # Perf instrumentation (PERF-INSPECT): log TTFT (time-to-first-token) +
+        # total generation ms per turn so Render logs show the brain-leg budget.
+        t0 = time.monotonic()
+        ttft_logged = False
+
+        def _log_ttft() -> None:
+            nonlocal ttft_logged
+            if not ttft_logged:
+                ttft_logged = True
+                logger.info(
+                    "[cue][perf] TTFT physician=%s model=%s opening=%s ms=%d",
+                    physician_id, model, int(body.opening), int((time.monotonic() - t0) * 1000),
+                )
+
         try:
             # ----- Opening greeting: direct stream, no tool loop -----
             if body.opening:
@@ -366,8 +385,11 @@ async def cue_chat(
                     max_tokens=body.max_tokens,
                 ):
                     if delta:
+                        _log_ttft()
                         captured.append(delta)
                         yield delta.encode("utf-8")
+                logger.info("[cue][perf] turn-total physician=%s opening=1 ms=%d",
+                            physician_id, int((time.monotonic() - t0) * 1000))
                 return
 
             # ----- Conversational turn: stream the tool loop's deltas -----
@@ -384,11 +406,14 @@ async def cue_chat(
                 if etype == "delta":
                     delta = ev.get("text", "")
                     if delta:
+                        _log_ttft()
                         captured.append(delta)
                         yield delta.encode("utf-8")
                 elif etype == "done":
                     usage_totals = ev.get("usage", usage_totals)
                     pending_confirm = ev.get("pending_confirm")
+            logger.info("[cue][perf] turn-total physician=%s ms=%d",
+                        physician_id, int((time.monotonic() - t0) * 1000))
 
             # D-03 surfacing (Plan 23-04): when a block/clear PROPOSER produced a
             # confirm card, emit it AFTER the text as ONE structured sentinel line:
@@ -803,6 +828,7 @@ async def cue_transcribe(
 
     from services.cue.voice import whisper_client
 
+    _t_stt = time.monotonic()
     try:
         result = await whisper_client.transcribe(
             audio, language=locale_hint, content_type=content_type
@@ -810,6 +836,8 @@ async def cue_transcribe(
     except Exception as exc:  # noqa: BLE001 — surface a clean 502, never leak audio
         logger.error("[cue] transcribe failed physician=%s: %s", physician_id, exc)
         raise HTTPException(status_code=502, detail="Transcription failed") from exc
+    logger.info("[cue][perf] STT physician=%s bytes=%d ms=%d",
+                physician_id, len(audio), int((time.monotonic() - _t_stt) * 1000))
 
     # Transient — returned, never persisted (T-23-05-02).
     return {"transcript": result.get("transcript", ""), "language": result.get("language")}
@@ -855,6 +883,7 @@ async def cue_tts(
     selection = resolve(physician_id, body.locale, supabase=supabase)
     provider = create_tts_provider(selection["provider"])
 
+    _t_tts = time.monotonic()
     try:
         audio = await provider.synthesize(
             text=text, voice_id=selection["voice_id"], locale=body.locale
@@ -868,6 +897,9 @@ async def cue_tts(
             exc.kind,
         )
         raise HTTPException(status_code=status, detail="Voice synthesis unavailable") from exc
+
+    logger.info("[cue][perf] TTS physician=%s provider=%s chars=%d ms=%d",
+                physician_id, selection["provider"], len(text), int((time.monotonic() - _t_tts) * 1000))
 
     media_type = "audio/mpeg" if selection["provider"] == "voxtral" else "audio/wav"
     return StreamingResponse(
@@ -960,12 +992,13 @@ async def _build_system_prompt(
     )
 
     try:
-        prompt = await assemble(
-            locale=locale,
-            surface="workspace",
-            physician_id=physician_id,
-            supabase=supabase,
-        )
+        # assemble() is a SYNCHRONOUS pure prompt-builder (locale + surface only).
+        # It does NOT accept physician_id/supabase and is NOT awaitable — the old
+        # `await assemble(..., physician_id=..., supabase=...)` raised TypeError on
+        # EVERY turn, silently dropping to the generic English fallback below
+        # (which is why Cue was English-only and said "How can I help?" — a phrase
+        # the real clinical core explicitly forbids).
+        prompt = assemble(locale=locale, surface="workspace")
         return prompt
     except Exception as exc:
         logger.error(

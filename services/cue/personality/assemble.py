@@ -123,25 +123,24 @@ def _format_header(ctx: AssembleContext) -> str:
 
 def _language_directive(locale: Locale) -> str:
     """
-    Emit an explicit per-locale language directive.
+    Emit the bilingual language directive (EN + ES).
 
-    AI-SPEC §4b.3 mandates: "An explicit 'Respond ONLY in SPANISH/ENGLISH.'
-    directive per locale baked into the assembled prompt."
+    Cue is bilingual: it MIRRORS the doctor's language turn-by-turn rather than
+    locking to a single locale (BeNeXT-parity — physicians switch freely between
+    Spanish and English mid-conversation). `locale` only sets the default for the
+    opening greeting, before the doctor has said anything.
 
-    This appears LAST in the assembled prompt so it is not buried by addendums.
+    Appears LAST in the assembled prompt so it is not buried by addendums.
     """
-    if locale == "es":
-        return (
-            "--- LANGUAGE DIRECTIVE ---\n\n"
-            "Respond ONLY IN SPANISH. "
-            "Even if the doctor writes to you in English, respond in Spanish. "
-            "Technical terms, brand names, and drug names may remain in their original language."
-        )
+    default_lang = "Spanish" if locale == "es" else "English"
     return (
         "--- LANGUAGE DIRECTIVE ---\n\n"
-        "Respond ONLY IN ENGLISH. "
-        "Even if the doctor writes to you in Spanish, respond in English. "
-        "Technical terms, brand names, and drug names may remain in their original language."
+        "Respond in the SAME language the doctor uses. If they write or speak to "
+        "you in Spanish, respond in Spanish; if in English, respond in English. "
+        "Mirror their language turn by turn — if they switch, you switch. "
+        f"When their language is not yet known (e.g. the opening greeting), default to {default_lang}. "
+        "Never tell the doctor you can only speak one language. "
+        "Technical terms, brand names, and drug names may stay in their original language."
     )
 
 
