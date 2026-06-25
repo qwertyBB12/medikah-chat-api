@@ -40,10 +40,16 @@ import os
 logger = logging.getLogger("cue.voice.catalog")
 
 # In-code PROVIDER-AWARE default voice map (the mandatory final fallback).
-# Voxtral voice ids are env-overridable so deploy config — not code — pins the
-# actual Mistral voice (Hector sets these alongside MISTRAL_API_KEY in Render).
-_DEFAULT_VOICE_EN = os.getenv("MISTRAL_CUE_VOICE_ID", "Cue-EN")
-_DEFAULT_VOICE_ES = os.getenv("MISTRAL_CUE_VOICE_ID_ES", os.getenv("MISTRAL_CUE_VOICE_ID", "Cue-ES"))
+# Voxtral voice ids are env-overridable so deploy config CAN pin the voice
+# (MISTRAL_CUE_VOICE_ID alongside MISTRAL_API_KEY in Render). The in-code default
+# is now Cue's REAL Voxtral voice (Hector-supplied 2026-06-24) instead of the old
+# "Cue-EN"/"Cue-ES" placeholders, so the voice works with zero env config. One id
+# covers EN + ES (bilingual voice).
+# NOTE: if the Render env var MISTRAL_CUE_VOICE_ID is still set to a PREVIOUS
+# voice, IT WINS over this default — update or clear it to use this one.
+_CUE_VOICE_ID = "2d06246f-1c89-4d2f-9c2f-18e307dc3367"
+_DEFAULT_VOICE_EN = os.getenv("MISTRAL_CUE_VOICE_ID", _CUE_VOICE_ID)
+_DEFAULT_VOICE_ES = os.getenv("MISTRAL_CUE_VOICE_ID_ES", os.getenv("MISTRAL_CUE_VOICE_ID", _CUE_VOICE_ID))
 
 DEFAULT_VOICES: dict[str, dict[str, str]] = {
     "en": {"voice_id": _DEFAULT_VOICE_EN, "provider": "voxtral"},
