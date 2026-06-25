@@ -111,12 +111,30 @@ async def run_cue_turn_streaming(
     {"type": "delta", "text": str}
         A user-facing text delta, as the model generates it. The route forwards
         these to the client immediately (TTFT) and accumulates them for the judge.
+    {"type": "tool", "phase": "start"|"end", "tool": str, ...}
+        A "thinking trace" frame, emitted as the agentic loop STARTS and FINISHES
+        each tool call (PURELY ADDITIVE — see THINKING TRACE below). The route
+        forwards these as \x1f-framed lines so the client can render cascading
+        terminal-style steps before the spoken answer.
     {"type": "done", "final_text": str, "usage": dict, "pending_confirm": dict|None}
         Exactly once, terminal. final_text is the assembled terminal text (== the
         concatenation of the streamed deltas in the common case); usage is the
         accumulated {"input_tokens","output_tokens"} across all rounds; and
         pending_confirm carries the D-03 {kind:'confirm', ...} payload when a
         block/clear PROPOSER stopped the loop (else None).
+
+    THINKING TRACE (tool-event frames — wire-spec v2, additive)
+    ------------------------------------------------------------
+    Immediately BEFORE a dispatch_tool() call, the loop yields
+    {"type":"tool","phase":"start","tool":<name>}; immediately AFTER a SUCCESSFUL
+    dispatch it yields {"type":"tool","phase":"end","tool":<name>,"ok":True} plus
+    an "items":n key ONLY when n>0 (n = number of result lines starting with "- ",
+    per _count_items). On an executor exception it yields
+    {"type":"tool","phase":"end","tool":<name>,"ok":False} (no items). The end
+    frame for a D-03 proposer is emitted BEFORE the loop break, so a proposer
+    still gets its end frame. These yields are ADDITIVE: a turn with NO tool calls
+    is byte-identical to before (delta/done only). The non-streaming wrapper
+    run_cue_turn() reads only type=="done", so it ignores these transparently.
 
     D-03 / voice-parity note: every text delta the model emits is streamed live
     (including any short lead-in on a write-proposer turn). The actual calendar
@@ -244,6 +262,9 @@ async def run_cue_turn_streaming(
             tool_input = _get_block_attr(block, "input") or {}
             tool_use_id = _get_block_attr(block, "id")
 
+            # THINKING TRACE: announce the tool call STARTING (additive frame).
+            yield {"type": "tool", "phase": "start", "tool": tool_name}
+
             try:
                 result_text = await dispatch_tool(
                     tool_name=tool_name,
@@ -261,6 +282,17 @@ async def run_cue_turn_streaming(
                     physician_id,
                     len(result_text),
                 )
+
+                # THINKING TRACE: announce the SUCCESSFUL finish (additive frame).
+                # items=n only when n>0 (n = "- " result lines). This MUST run
+                # before the D-03 break below so a proposer still gets its end frame.
+                end_frame: dict[str, Any] = {
+                    "type": "tool", "phase": "end", "tool": tool_name, "ok": True,
+                }
+                n_items = _count_items(result_text)
+                if n_items:
+                    end_frame["items"] = n_items
+                yield end_frame
 
                 # D-03 SURFACING (Plan 23-04): a block/clear PROPOSER returns a
                 # json.dumps({kind:'confirm', ...}) tool_result. Detect it, capture
@@ -290,6 +322,10 @@ async def run_cue_turn_streaming(
                     "content": f"Error: {exc}",
                     "is_error": True,
                 })
+
+                # THINKING TRACE: announce the FAILED finish (additive frame).
+                # ok=False, no items — a failed tool produced no result list.
+                yield {"type": "tool", "phase": "end", "tool": tool_name, "ok": False}
 
         # 2b. D-03 STOP: a confirm card was proposed — return it structurally as
         #     pending_confirm WITHOUT appending the confirm tool_result back into
@@ -367,6 +403,22 @@ async def run_cue_turn(
             usage_totals = ev.get("usage", usage_totals)
             pending_confirm = ev.get("pending_confirm")
     return final_text, usage_totals, pending_confirm
+
+
+def _count_items(result_text: Any) -> Optional[int]:
+    """Return the number of result lines that start with "- ", or None when 0.
+
+    The read executors (calendar_read_day, inbox_read_recent) format their
+    results as a header line followed by one "- {item}" line per row. This counts
+    those rows so the "thinking trace" end frame can show "✓ 14 eventos". A header
+    line or an empty/"no results" string yields no "- " lines → None (so the
+    caller OMITS the items key, per the wire spec). Non-string tool_results (the
+    D-03 {kind:'confirm'} JSON payload) return None without crashing.
+    """
+    if not isinstance(result_text, str):
+        return None
+    n = sum(1 for line in result_text.splitlines() if line.startswith("- "))
+    return n if n > 0 else None
 
 
 def _try_parse_confirm(result_text: Any) -> Optional[dict]:

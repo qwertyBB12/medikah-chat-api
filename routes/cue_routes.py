@@ -409,6 +409,23 @@ async def cue_chat(
                         _log_ttft()
                         captured.append(delta)
                         yield delta.encode("utf-8")
+                elif etype == "tool":
+                    # THINKING TRACE (wire-spec v2): a tool-event frame —
+                    #   \x1f (US) + compact JSON {phase, tool, [ok], [items]} + \n
+                    # Emitted as the agentic loop starts/finishes each tool call so
+                    # the client can render cascading terminal-style steps. NOT
+                    # spoken text: it is NOT appended to `captured` (the judge text)
+                    # and does NOT count toward TTFT (a text metric). None-valued
+                    # keys are dropped so 'ok'/'items' appear only when present.
+                    frame = b"\x1f" + json.dumps({
+                        k: v for k, v in {
+                            "phase": ev.get("phase"),
+                            "tool": ev.get("tool"),
+                            "ok": ev.get("ok"),
+                            "items": ev.get("items"),
+                        }.items() if v is not None
+                    }).encode("utf-8") + b"\n"
+                    yield frame
                 elif etype == "done":
                     usage_totals = ev.get("usage", usage_totals)
                     pending_confirm = ev.get("pending_confirm")
