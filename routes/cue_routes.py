@@ -400,6 +400,7 @@ async def cue_chat(
                 system_prompt=system_prompt,
                 messages=messages,
                 physician_id=physician_id,
+                locale=body.locale,
                 max_tokens=body.max_tokens,
             ):
                 etype = ev.get("type")

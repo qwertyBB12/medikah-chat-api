@@ -199,6 +199,7 @@ async def dispatch_tool(
     tool_name: str,
     tool_input: dict,
     physician_id: str,  # ALWAYS from the verified session — never from tool_input
+    locale: str = "es",
 ) -> str:
     """
     Route a tool_use block to the appropriate executor.
@@ -239,13 +240,13 @@ async def dispatch_tool(
         # Phase 23 HANDS-03/04 — PURE PROPOSER (D-03). Returns ONLY a confirm-card
         # payload (JSON string); never writes. 'confirmed' is stripped above.
         from services.cue.tools.executors import calendar_block_time
-        return await calendar_block_time(physician_id=physician_id, **safe_input)
+        return await calendar_block_time(physician_id=physician_id, locale=locale, **safe_input)
 
     if tool_name == "calendar_clear_range":
         # Phase 23 HANDS-03/04 — PURE PROPOSER (D-03). Returns ONLY a confirm-card
         # payload (JSON string); never writes. 'confirmed' is stripped above.
         from services.cue.tools.executors import calendar_clear_range
-        return await calendar_clear_range(physician_id=physician_id, **safe_input)
+        return await calendar_clear_range(physician_id=physician_id, locale=locale, **safe_input)
 
     # Unknown tool — raise so the engine returns an is_error tool_result
     raise ValueError(f"Unknown tool: {tool_name!r}")
