@@ -199,7 +199,7 @@ async def workspace_status(
         # Look up physician_workspace_accounts by physician_id
         result = (
             db.table("physician_workspace_accounts")
-            .select("tier, mailbox_address, updated_at")
+            .select("tier, mailbox_address, mailbox_local_part, updated_at")
             .eq("physician_id", auth.physician_id)
             .limit(1)
             .execute()
@@ -217,6 +217,10 @@ async def workspace_status(
         row = result.data[0]
         tier = row.get("tier", "free")
         mailbox_address = row.get("mailbox_address")
+        if not mailbox_address:
+            local_part = row.get("mailbox_local_part")
+            if local_part:
+                mailbox_address = f"{local_part}@medikah.health"
 
     # Check for an active (non-terminal) provisioning run in the last 15 minutes
     has_active_run = False
