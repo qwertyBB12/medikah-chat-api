@@ -89,6 +89,7 @@ async def run_cue_turn_streaming(
     system_prompt: str,
     messages: list[dict],
     physician_id: str,               # from verified session — NEVER from tool args (CUE-11)
+    locale: str = "es",
     max_tokens: int = 1024,
     max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
     tools: Optional[list[CueNeutralTool]] = None,
@@ -270,6 +271,7 @@ async def run_cue_turn_streaming(
                     tool_name=tool_name,
                     tool_input=tool_input,
                     physician_id=physician_id,  # session-derived; model cannot override
+                    locale=locale,
                 )
                 tool_results.append({
                     "type": "tool_result",

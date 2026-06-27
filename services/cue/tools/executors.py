@@ -315,6 +315,7 @@ async def calendar_block_time(
     start_iso: str,     # functional arg
     end_iso: str,       # functional arg
     title: str,         # functional arg
+    locale: str = "es", # session-derived (dispatcher kwarg)
 ) -> str:
     """PROPOSE a calendar block (D-03). NEVER writes — returns a confirm card only.
 
@@ -326,13 +327,15 @@ async def calendar_block_time(
     import json
 
     rng = _range_summary(start_iso, end_iso)
+    if locale == "es":
+        summary = f"¿Bloquear {rng} «{title}»?"
+    else:
+        summary = f'Block {rng} "{title}"?'
     payload = {
         "kind": "confirm",
         "action": "block",
         "title": title,
-        "summary": (
-            f"¿Bloquear {rng} «{title}»? / Block {rng} “{title}”?"
-        ),
+        "summary": summary,
         "start_iso": start_iso,
         "end_iso": end_iso,
     }
@@ -343,6 +346,7 @@ async def calendar_clear_range(
     physician_id: str,  # session-derived (dispatcher kwarg) — never model-supplied
     start_iso: str,     # functional arg
     end_iso: str,       # functional arg
+    locale: str = "es", # session-derived (dispatcher kwarg)
 ) -> str:
     """PROPOSE clearing Cue blocks in a range (D-03). NEVER writes — confirm card only.
 
@@ -353,14 +357,15 @@ async def calendar_clear_range(
     import json
 
     rng = _range_summary(start_iso, end_iso)
+    if locale == "es":
+        summary = f"¿Liberar los bloques de Cue en {rng}?"
+    else:
+        summary = f"Clear Cue blocks in {rng}?"
     payload = {
         "kind": "confirm",
         "action": "clear",
         "title": "",
-        "summary": (
-            f"¿Liberar los bloques de Cue en {rng}? / "
-            f"Clear Cue blocks in {rng}?"
-        ),
+        "summary": summary,
         "start_iso": start_iso,
         "end_iso": end_iso,
     }
