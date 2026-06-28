@@ -181,27 +181,8 @@ def delete_note(supabase, physician_id: str, note_id: str) -> bool:
         logger.error("[cue-memory] delete_note failed for %s/%s: %s", physician_id, note_id, exc)
         return False
 
-
-def correct_note(supabase, physician_id: str, note_id: str, note: str, embedding) -> bool:
-    """Doctor edits a note's text (re-embedded by the caller). Scoped by id AND
-    physician_id (IDOR guard). Returns True on success, False on error."""
-    if supabase is None:
-        return False
-    try:
-        payload = {"note": note, "updated_at": datetime.now(timezone.utc).isoformat()}
-        if embedding is not None:
-            payload["embedding"] = embedding
-        (
-            supabase.table("cue_memory_notes")
-            .update(payload)
-            .eq("id", note_id)
-            .eq("physician_id", physician_id)
-            .execute()
-        )
-        return True
-    except Exception as exc:
-        logger.error("[cue-memory] correct_note failed for %s/%s: %s", physician_id, note_id, exc)
-        return False
+# NOTE: there is deliberately NO correct_note / edit op. Doctors view + delete only;
+# rewriting a note would silently skew Cue's reasoning (product decision 2026-06-28).
 
 
 def update_note(supabase, note_id: str, note: str, embedding, salience: int) -> None:

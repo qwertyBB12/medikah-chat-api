@@ -76,7 +76,6 @@ from services.cue.memory.store import (
     has_aviso_ack,
     list_notes,
     delete_note,
-    correct_note,
 )
 from services.cue.memory.recall import assemble_recall_envelope
 from services.cue.memory.embeddings import embed as embed_text
@@ -174,12 +173,6 @@ class CueTtsRequest(BaseModel):
 
     text: str
     locale: str = "es"               # "en" | "es" — physicians Spanish-first
-
-
-class CueMemoryCorrectRequest(BaseModel):
-    """Body for PATCH /cue/memory/{note_id} — the doctor edits a remembered note."""
-
-    note: str
 
 
 # POST /cue/transcribe accepts a raw audio body (no JSON model). Cap at 5MB —
@@ -1063,22 +1056,10 @@ async def delete_memory_note(
     return {"deleted": True}
 
 
-@router.patch("/memory/{note_id}")
-async def correct_memory_note(
-    note_id: str,
-    body: CueMemoryCorrectRequest,
-    auth: AuthenticatedPhysician = Depends(authenticated_physician),
-) -> dict:
-    """Correct a note's text. Re-embeds so semantic recall reflects the edit."""
-    supabase = get_supabase()
-    text = (body.note or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Note text cannot be empty")
-    new_embedding = await embed_text(text)
-    ok = correct_note(supabase, auth.physician_id, note_id, text, new_embedding)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Could not update the note")
-    return {"updated": True}
+# NOTE: there is deliberately NO edit/PATCH endpoint. Doctors can view and DELETE
+# their notes, but never rewrite one — a rewritten note would silently change how
+# Cue reasons, with effects the doctor cannot see (product decision 2026-06-28).
+# Delete is a privacy right; edit authority is withheld.
 
 
 # ---------------------------------------------------------------------------
