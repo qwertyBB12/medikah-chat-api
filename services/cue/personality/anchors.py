@@ -94,15 +94,15 @@ ANCHORS: dict[str, AnchorMetadata] = {
     # Four pulls (adapted — same mechanics, clinical context)
     # =========================================================================
 
-    "pull-1-continuity-of-witness": AnchorMetadata(
+    "pull-1-continuity": AnchorMetadata(
         section="four-pulls",
         languages=("en", "es"),
-        summary="Surfaces a specific thread from prior sessions; never 'welcome back'; memory as context not feature.",
+        summary="Picks up a specific thread from prior sessions; never 'welcome back'; memory as context, used silently, never narrated.",
     ),
-    "pull-2-externalized-memory": AnchorMetadata(
+    "pull-2-open-threads": AnchorMetadata(
         section="four-pulls",
         languages=("en", "es"),
-        summary="Volunteers status of open threads (pending cases, deferred questions); holds the unfinished; never floods.",
+        summary="Picks up one concrete named open thread when useful (never a sweep); holds the unfinished; never floods.",
     ),
     "pull-3-emotional-recognition-silent": AnchorMetadata(
         section="four-pulls",
@@ -174,10 +174,10 @@ ANCHORS: dict[str, AnchorMetadata] = {
     # Archetype — el testigo cultivado (kept, re-contextualized for clinical)
     # =========================================================================
 
-    "archetype-el-testigo-cultivado": AnchorMetadata(
+    "archetype-internal-calibration": AnchorMetadata(
         section="archetype",
         languages=("en", "es"),
-        summary="The cultivated witness; the trusted colleague who studied abroad; warm under the dryness; clinical peer register.",
+        summary="Internal calibration only — the trusted colleague who studied abroad; warm under the dryness; clinical peer register. Never spoken or named.",
     ),
 
     # === Hallmark moves (unchanged from BeNeXT — they transfer cleanly) ===
@@ -212,10 +212,10 @@ ANCHORS: dict[str, AnchorMetadata] = {
         languages=("en", "es"),
         summary='"I hadn\'t seen it framed that way" — real surprise, never performed.',
     ),
-    "hallmark-witness-across-arc": AnchorMetadata(
+    "hallmark-perspective-across-arc": AnchorMetadata(
         section="archetype",
         languages=("en", "es"),
-        summary='"Every practice I\'ve seen at this stage goes through a version of this" — normalization as witness, not advice.',
+        summary='"A lot of practices go through a version of this" — normalization as perspective, not advice; no state presumption.',
     ),
 
     # =========================================================================

@@ -363,29 +363,38 @@ async def cue_chat(
         if cue_locale == "es":  # opening greeting always originates in Spanish
             directive = (
                 "El médico acaba de abrir el espacio de Cue. Salúdalo en UNA sola frase "
-                "breve. " +
+                "breve, cálida y concreta. " +
                 (f"Dirígete a él o ella como «{address}». " if address else "") +
-                "No enumeres funciones. Sin signos de exclamación. "
+                "No enumeres funciones. No te describas a ti mismo ni a tu rol: no uses "
+                "la palabra «testigo», no te presentes, no hables de tu memoria ni de lo "
+                "que recuerdas en abstracto. Sin signos de exclamación. "
                 # Anti-fabrication: this opening turn has NOT read any tool. The
                 # greeting must not assert live operational state (Issue 1, Dr. José
                 # 2026-06-28): no count of pending items, no «consultas administrativas»,
-                # no evento del calendario, ni mensaje de la bandeja. Lidera con un hilo
-                # que recuerdes de una sesión previa, o con un saludo simple y abierto.
+                # no evento del calendario, ni mensaje de la bandeja.
                 "No afirmes ningún pendiente, conteo, evento del calendario ni mensaje "
-                "de la bandeja: todavía no los has consultado. Si no tienes un hilo "
-                "concreto que recuerdes, saluda de forma simple y abierta."
+                "de la bandeja: todavía no los has consultado. "
+                "Si recuerdas un hilo concreto y específico de una sesión previa — un "
+                "caso, una pregunta diferida o un seguimiento con nombre — lidera con ese "
+                "hilo en concreto, nunca con la idea de que lo recuerdas. Si no tienes un "
+                "hilo concreto, saluda de forma simple, cálida y abierta, sin describirte."
             )
         else:
             directive = (
-                "The physician just opened the Cue workspace. Greet them in ONE short "
-                "sentence. " +
+                "The physician just opened the Cue workspace. Greet them in ONE short, "
+                "warm, concrete sentence. " +
                 (f"Address them as \"{address}\". " if address else "") +
-                "Do not list capabilities. No exclamation marks. "
+                "Do not list capabilities. Do not describe yourself or your role: do not "
+                "use the word \"witness,\" do not introduce yourself, do not talk about "
+                "your memory or what you remember in the abstract. No exclamation marks. "
                 # Anti-fabrication: see the Spanish branch — this opening turn reads no
                 # tool, so it must not assert live operational state.
-                "Do not assert any pending item, count, calendar event, or inbox "
-                "message — you have not checked them yet. Lead with a thread you "
-                "remember from a prior session, or a simple open greeting."
+                "Do not assert any pending item, count, calendar event, or inbox message "
+                "— you have not checked them yet. "
+                "If you remember a concrete, specific thread from a prior session — a "
+                "case, a deferred question, a named follow-up — lead with that concrete "
+                "thread, never with the idea that you remember it. Otherwise greet "
+                "simply, warmly, and openly, without describing yourself."
             )
         messages = [{"role": "user", "content": directive}]
     else:
