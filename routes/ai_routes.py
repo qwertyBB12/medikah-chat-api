@@ -1,13 +1,16 @@
 """AI clinical decision support routes.
 
-CUE-09 MIGRATION (Phase 22)
-----------------------------
-The gpt-4o call that was inline here (lines ~124 in the pre-migration version)
-now routes through `utils.openai_client.openai_complete()` — a provider-neutral
-`complete(messages, model, max_tokens, temperature)` wrapper. A future US-BAA
-provider or Claude can drop in with zero edits to this file.
+CUE-09 MIGRATION (Phase 22) + diagnosis-on-Claude switch
+--------------------------------------------------------
+The differential-diagnosis call now routes through the provider-neutral
+`utils.anthropic_client.anthropic_complete()` wrapper, which runs the request on
+Claude (the Opus tier — the model reserved for the high-stakes clinical /
+diagnosis surface) via the shared Cue adapter. The previous gpt-4o path went
+through `utils.openai_client.openai_complete()`; the swap was a one-line call-site
+change because both wrappers expose the same neutral `complete()`-shaped contract.
+Switching providers again (e.g. a future US-BAA provider) stays a wrapper swap.
 
-No Anthropic-specific types appear here (D1 rule — verified by
+No provider-specific types appear here (D1 rule — verified by
 tests/cue/test_no_provider_leak.py).
 """
 
@@ -22,7 +25,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from utils.auth import AuthenticatedPhysician, authenticated_physician
-from utils.openai_client import openai_complete
+from utils.anthropic_client import anthropic_complete
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +62,12 @@ Work only with the clinical presentation provided.
 9. Respond in the same language as the input (English or Spanish).
 """
 
-# Model + params (OpenAI; CUE-09 seam — swap in adapter.complete() here for Anthropic)
-_DIAGNOSIS_MODEL = "gpt-4o"
+# Model routing: the diagnosis surface runs on the Opus reasoning tier (the
+# highest-stakes clinical tier). The tier→model map lives in the adapter, so this
+# stays a quality knob, not a hardcoded model id. No sampling params: the Opus 4.x
+# family rejects temperature/top_p/top_k.
+_DIAGNOSIS_TIER = "opus"
 _DIAGNOSIS_MAX_TOKENS = 1200
-_DIAGNOSIS_TEMPERATURE = 0.3
 
 
 class DiagnosisRequest(BaseModel):
@@ -132,20 +137,22 @@ async def ai_diagnosis(
         "End with a Red Flags section."
     )
 
+    # Claude takes the system prompt as a separate argument (not a system-role
+    # message), so the wrapper receives it explicitly and the message list is
+    # user-only.
     messages = [
-        {"role": "system", "content": _DIAGNOSIS_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 
-    # CUE-09: route through provider-neutral openai_complete() instead of
-    # calling _openai_client.chat.completions.create() directly.
-    # A provider swap (Claude/BAA) needs zero edits to this block.
+    # Route through the provider-neutral wrapper. The diagnosis surface runs on
+    # Claude (Opus tier) via the shared adapter; a provider swap needs zero edits
+    # to this block.
     try:
-        raw_text = await openai_complete(
+        raw_text = await anthropic_complete(
+            system_prompt=_DIAGNOSIS_SYSTEM_PROMPT,
             messages=messages,
-            model=_DIAGNOSIS_MODEL,
+            tier=_DIAGNOSIS_TIER,
             max_tokens=_DIAGNOSIS_MAX_TOKENS,
-            temperature=_DIAGNOSIS_TEMPERATURE,
         )
 
         if raw_text is None:
