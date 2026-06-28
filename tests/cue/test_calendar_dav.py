@@ -338,3 +338,83 @@ class TestClearRangeBlastRadius:
             f"clear_range must return {{deleted:0, skipped:1}} when no Cue-managed "
             f"events exist; got {result}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Content idempotency — block_time must NOT double-book an identical block
+# (anti-double-book: mic double-capture / duplicate tool call / two cards).
+# ---------------------------------------------------------------------------
+class TestBlockTimeContentIdempotency:
+    @pytest.mark.asyncio
+    async def test_block_time_dedupes_identical_existing_block(self, monkeypatch):
+        """If an identical X-CUE-MANAGED block already exists at the same
+        window+title, block_time returns its uid and does NOT write a second."""
+        import services.cue.calendar_dav as cdav
+        from icalendar import Event as _E, vText
+
+        start_iso = "2026-07-01T15:00:00+00:00"
+        end_iso = "2026-07-01T16:00:00+00:00"
+        title = "Jose Luis Aguirre"
+
+        existing = _E()
+        existing.add("uid", "cue-existing-1")
+        existing.add("summary", title)
+        existing.add("dtstart", datetime(2026, 7, 1, 15, 0, 0, tzinfo=timezone.utc))
+        existing.add("dtend", datetime(2026, 7, 1, 16, 0, 0, tzinfo=timezone.utc))
+        existing.add("X-CUE-MANAGED", vText("true"))
+        mock_event = MagicMock()
+        mock_event.icalendar_component = existing
+
+        saved: list = []
+        mock_calendar = MagicMock()
+        mock_calendar.search = MagicMock(return_value=[mock_event])
+        mock_calendar.save_event = lambda ical: saved.append(ical)
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        monkeypatch.setattr(cdav, "_cue_client", lambda u, p: mock_client)
+        monkeypatch.setattr(cdav, "_resolve_calendar", lambda c: mock_calendar)
+
+        uid = await cdav.block_time(
+            "user", "pass", start_iso, end_iso, title, physician_id="p1"
+        )
+        assert uid == "cue-existing-1", "must return the existing block uid (idempotent)"
+        assert saved == [], "must NOT write a second identical block"
+
+    @pytest.mark.asyncio
+    async def test_block_time_writes_when_no_identical_block(self, monkeypatch):
+        """A different time/title is NOT a duplicate — block_time writes normally."""
+        import services.cue.calendar_dav as cdav
+        from icalendar import Event as _E, vText
+
+        existing = _E()
+        existing.add("uid", "cue-other")
+        existing.add("summary", "Some other block")
+        existing.add("dtstart", datetime(2026, 7, 1, 9, 0, 0, tzinfo=timezone.utc))
+        existing.add("dtend", datetime(2026, 7, 1, 10, 0, 0, tzinfo=timezone.utc))
+        existing.add("X-CUE-MANAGED", vText("true"))
+        mock_event = MagicMock()
+        mock_event.icalendar_component = existing
+
+        saved: list = []
+        mock_calendar = MagicMock()
+        mock_calendar.search = MagicMock(return_value=[mock_event])
+        mock_calendar.save_event = lambda ical: saved.append(ical)
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        monkeypatch.setattr(cdav, "_cue_client", lambda u, p: mock_client)
+        monkeypatch.setattr(cdav, "_resolve_calendar", lambda c: mock_calendar)
+
+        uid = await cdav.block_time(
+            "user", "pass",
+            "2026-07-01T15:00:00+00:00", "2026-07-01T16:00:00+00:00",
+            "Jose Luis Aguirre", physician_id="p1",
+        )
+        assert uid.startswith("cue-"), "must mint a new uid"
+        assert uid != "cue-other"
+        assert len(saved) == 1, "must write the new (non-duplicate) block"

@@ -233,6 +233,58 @@ def _build_block_calendar(uid: str, start_iso: str, end_iso: str, title: str) ->
     return vcal.to_ical().decode("utf-8")
 
 
+def _as_utc_instant(value: Any) -> Optional[datetime]:
+    """Normalize a CalDAV DTSTART/DTEND value (date or datetime, naive or aware)
+    to a tz-aware UTC datetime for exact-instant comparison. Returns None if it
+    cannot be normalized (the caller treats that as 'no match' → proceeds to write).
+    """
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _find_duplicate_block(
+    cal: Any, start_utc: datetime, end_utc: datetime, title: str
+) -> Optional[str]:
+    """Content idempotency (anti-double-book): return the UID of an existing
+    X-CUE-MANAGED block at the EXACT same window AND title, if one already exists.
+
+    This makes block_time idempotent on content, not just on the request token —
+    so a double-captured mic, a duplicated tool call, or two confirm cards for the
+    same slot collapse to a single block instead of double-booking. Two identical
+    cue-managed blocks (same start, same end, same title) are always a duplicate.
+    Fail-open: any lookup error returns None and the caller proceeds to write.
+    """
+    try:
+        events = cal.search(start=start_utc, end=end_utc, event=True, expand=False)
+    except Exception:
+        return None
+    for e in events:
+        try:
+            comp = e.icalendar_component
+            if not _is_cue_managed(comp):
+                continue
+            ds = comp.get("DTSTART")
+            de = comp.get("DTEND")
+            e_start = _as_utc_instant(ds.dt if ds is not None else None)
+            e_end = _as_utc_instant(de.dt if de is not None else None)
+            if (
+                e_start == start_utc
+                and e_end == end_utc
+                and str(comp.get("SUMMARY", "")) == title
+            ):
+                return str(comp.get("UID", ""))
+        except Exception:
+            continue
+    return None
+
+
 async def block_time(
     username: str,
     password: str,
@@ -249,22 +301,33 @@ async def block_time(
     log/trace correlation — it is NEVER part of the CalDAV identity (that is the
     username/password credential).
     """
+    start_utc = _to_utc(start_iso)
+    end_utc = _to_utc(end_iso)
     uid = f"cue-{uuid.uuid4()}"
     ical_str = _build_block_calendar(uid, start_iso, end_iso, title)
+
+    def _write(cal: Any) -> str:
+        # Content idempotency: if an identical cue-managed block already exists at
+        # this exact window+title, return it instead of double-booking.
+        dupe = _find_duplicate_block(cal, start_utc, end_utc, title)
+        if dupe:
+            logger.info(
+                "[cue:caldav] block_time dedup: identical block exists uid=%s physician=%s",
+                dupe,
+                physician_id,
+            )
+            return dupe
+        cal.save_event(ical_str)
+        logger.info(
+            "[cue:caldav] block_time wrote uid=%s physician=%s", uid, physician_id
+        )
+        return uid
 
     client = _cue_client(username, password)
     if hasattr(client, "__enter__"):
         with client as c:
-            cal = _resolve_calendar(c)
-            cal.save_event(ical_str)
-    else:
-        cal = _resolve_calendar(client)
-        cal.save_event(ical_str)
-
-    logger.info(
-        "[cue:caldav] block_time wrote uid=%s physician=%s", uid, physician_id
-    )
-    return uid
+            return _write(_resolve_calendar(c))
+    return _write(_resolve_calendar(client))
 
 
 async def clear_range(
