@@ -78,14 +78,14 @@ def _done(events: list[dict]) -> dict:
 
 # A dispatcher whose result text has n "- " lines (the executors' list format).
 def _make_list_dispatch(n_items: int):
-    async def _dispatch(*, tool_name: str, tool_input: dict, physician_id: str) -> str:
+    async def _dispatch(*, tool_name: str, tool_input: dict, physician_id: str, locale: str = "es") -> str:
         header = "2026-07-01:"
         items = [f"- 09:00 → 09:30: event {i}" for i in range(n_items)]
         return "\n".join([header, *items]) if items else "No events today."
     return _dispatch
 
 
-async def _dispatch_raises(*, tool_name: str, tool_input: dict, physician_id: str) -> str:
+async def _dispatch_raises(*, tool_name: str, tool_input: dict, physician_id: str, locale: str = "es") -> str:
     raise RuntimeError("Simulated executor error")
 
 
