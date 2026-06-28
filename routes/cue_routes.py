@@ -71,8 +71,9 @@ from db.client import get_supabase
 from services.cue.adapter import create_adapter, select_model
 from services.cue.engine import run_cue_turn, run_cue_turn_streaming
 from services.cue.memory.judge import run_memory_judge
-from services.cue.memory.store import load_recent_notes, has_aviso_ack
+from services.cue.memory.store import load_relevant_notes, has_aviso_ack
 from services.cue.memory.recall import assemble_recall_envelope
+from services.cue.memory.embeddings import embed as embed_text
 from services.cue.gate import (
     BudgetStatus,
     KillSwitchResult,
@@ -309,11 +310,21 @@ async def cue_chat(
     # ------------------------------------------------------------------
     # GATE 5: Context assembly (Plan 22-03 assemble())
     # Scoped to physician_id from session (CUE-11).
+    # Slice 2: the last user message drives SEMANTIC recall (the right memories
+    # for this moment, not just the newest). The opening greeting has no query →
+    # recency fallback inside _build_system_prompt.
     # ------------------------------------------------------------------
+    recall_query = None
+    if not body.opening and body.messages:
+        recall_query = next(
+            (m.get("content", "") for m in reversed(body.messages) if m.get("role") == "user"),
+            None,
+        )
     system_prompt: str = await _build_system_prompt(
         physician_id=physician_id,
         locale=cue_locale,
         supabase=supabase,
+        query_text=recall_query,
     )
 
     # ------------------------------------------------------------------
@@ -1093,6 +1104,7 @@ async def _build_system_prompt(
     physician_id: str,
     locale: str,
     supabase,
+    query_text: str | None = None,
 ) -> str:
     """
     Assemble the clinical system prompt for the physician.
@@ -1129,8 +1141,11 @@ async def _build_system_prompt(
         # the real clinical core explicitly forbids).
         prompt = assemble(locale=locale, surface="workspace")
         # Phase 25 MEM-01: prepend the cross-session recall envelope (fail-open).
-        # load_recent_notes never raises; an empty list yields no envelope.
-        notes = load_recent_notes(supabase, physician_id, limit=10)
+        # Slice 2: embed the query (fail-open) for SEMANTIC recall — the right
+        # memories for this moment; load_relevant_notes falls back to recency when
+        # there is no query or nothing is embedded yet. Never raises.
+        query_embedding = await embed_text(query_text) if query_text else None
+        notes = load_relevant_notes(supabase, physician_id, query_embedding, limit=10)
         if notes:
             recall = assemble_recall_envelope(notes, locale)
             prompt = recall + "\n\n" + prompt
