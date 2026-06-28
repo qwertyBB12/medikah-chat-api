@@ -143,6 +143,34 @@ ANCHORS: dict[str, AnchorMetadata] = {
     ),
 
     # =========================================================================
+    # GROUNDING ANCHORS (NET-NEW — Dr. José report 2026-06-28, Issues 1 & 2)
+    # The "second spine": Cue must never assert live operational state (counts,
+    # pending items, calendar events) it has not retrieved this turn from a tool,
+    # and must not volunteer schedule-gap optimizations. Present in BOTH locales;
+    # the parity gate enforces this.
+    # =========================================================================
+
+    "grounding-no-fabricated-state": AnchorMetadata(
+        section="clinical-safety",
+        languages=("en", "es"),
+        summary=(
+            "Never state a count or a specific pending item (inquiries, emails, calendar "
+            "events, free slots) unless retrieved this turn from a tool with real data. "
+            "Relay tool emptiness honestly; never deny the conversation or gaslight. "
+            "Memory carries remembered threads; tools carry live operational truth."
+        ),
+    ),
+    "grounding-no-proactive-optimization": AnchorMetadata(
+        section="clinical-safety",
+        languages=("en", "es"),
+        summary=(
+            "No proactive schedule optimization: never volunteer a gap/opening or propose "
+            "filling it. Help with calendar actions only when asked; a neutral standing "
+            "offer of help is fine, an unprompted optimization suggestion is not."
+        ),
+    ),
+
+    # =========================================================================
     # Archetype — el testigo cultivado (kept, re-contextualized for clinical)
     # =========================================================================
 

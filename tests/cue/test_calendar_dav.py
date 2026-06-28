@@ -35,6 +35,68 @@ from services.cue.calendar_dav import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# Test 0 — read_day must render event times in the physician's LOCAL timezone
+# (Dr. José report 2026-06-28 Issue 3: a 9:00 AM event surfaced as 15:00 UTC)
+# ---------------------------------------------------------------------------
+
+class TestReadDayLocalTime:
+    """read_day must surface event times in the physician's local zone, not UTC.
+
+    SOGo stores events in UTC and caldav `expand=True` normalizes to UTC. A
+    9:00 AM America/Mexico_City event is stored as 15:00 UTC. Handing the model
+    the raw UTC string makes Cue report "15:00" — the exact bug Dr. José hit.
+    read_day must convert to the local zone before returning.
+    """
+
+    @pytest.mark.asyncio
+    async def test_read_day_returns_local_time_not_utc(self):
+        from icalendar import Event
+
+        # 9:00–11:00 America/Mexico_City  ==  15:00–17:00 UTC (stored form)
+        vevent = Event()
+        vevent.add("uid", "evt-aguirre-001")
+        vevent.add("summary", "Medikah meeting")
+        vevent.add("dtstart", datetime(2026, 6, 27, 15, 0, 0, tzinfo=timezone.utc))
+        vevent.add("dtend", datetime(2026, 6, 27, 17, 0, 0, tzinfo=timezone.utc))
+
+        mock_event = MagicMock()
+        mock_event.icalendar_component = vevent
+
+        mock_calendar = MagicMock()
+        mock_calendar.search.return_value = [mock_event]
+        mock_calendar.url = (
+            "https://practikah.medikah.health/SOGo/dav/testdoc/Calendar/personal/"
+        )
+        mock_principal = MagicMock()
+        mock_principal.calendars.return_value = [mock_calendar]
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.principal.return_value = mock_principal
+
+        with patch("caldav.DAVClient", return_value=mock_client):
+            events = await read_day(
+                "testdoc@medikah.health",
+                "app-passwd-secret",
+                "2026-06-27",
+                tz_name="America/Mexico_City",
+            )
+
+        assert len(events) == 1
+        ev = events[0]
+        # The local 9:00 AM start must surface as 09:00, never the 15:00 UTC value.
+        assert "09:00" in ev["dtstart"], (
+            f"read_day must render the start in local time (09:00); got {ev['dtstart']!r}"
+        )
+        assert "11:00" in ev["dtend"], (
+            f"read_day must render the end in local time (11:00); got {ev['dtend']!r}"
+        )
+        assert "15:00" not in ev["dtstart"], (
+            f"read_day leaked the UTC value into the start; got {ev['dtstart']!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 1 — HANDS-03: block_time must tag the event X-CUE-MANAGED
 # ---------------------------------------------------------------------------
 
