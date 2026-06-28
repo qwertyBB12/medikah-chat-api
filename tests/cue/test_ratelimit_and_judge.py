@@ -77,8 +77,12 @@ class TestBudgetCheck:
                 def maybe_single(self, *a, **kw):
                     return self
                 def execute(self):
-                    # physician cap is 200_000 input
-                    return MagicMock(data={"input_tokens": 200_000, "output_tokens": 0})
+                    from services.cue.gate import _TIER_CAPS
+                    # at the physician INPUT cap → exceeded. Cap-relative so this
+                    # never rots when caps change (2026-06-28: caps raised ~500x).
+                    return MagicMock(
+                        data={"input_tokens": _TIER_CAPS["physician"]["input"], "output_tokens": 0}
+                    )
             def table(self, *a, **kw):
                 return self._Chain()
 
@@ -101,8 +105,11 @@ class TestBudgetCheck:
                 def maybe_single(self, *a, **kw):
                     return self
                 def execute(self):
-                    # physician cap is 50_000 output
-                    return MagicMock(data={"input_tokens": 0, "output_tokens": 50_000})
+                    from services.cue.gate import _TIER_CAPS
+                    # at the physician OUTPUT cap → exceeded (cap-relative).
+                    return MagicMock(
+                        data={"input_tokens": 0, "output_tokens": _TIER_CAPS["physician"]["output"]}
+                    )
             def table(self, *a, **kw):
                 return self._Chain()
 
@@ -175,9 +182,12 @@ class TestBudgetCheck:
                 def maybe_single(self, *a, **kw):
                     return self
                 def execute(self):
-                    # trial cap is 20_000 input; this is under physician cap
-                    # but over trial cap
-                    return MagicMock(data={"input_tokens": 20_000, "output_tokens": 0})
+                    from services.cue.gate import _TIER_CAPS
+                    # at the trial INPUT cap → exceeded for trial, still well under
+                    # the (much higher) physician cap → not exceeded for physician.
+                    return MagicMock(
+                        data={"input_tokens": _TIER_CAPS["trial"]["input"], "output_tokens": 0}
+                    )
             def table(self, *a, **kw):
                 return self._Chain()
 
@@ -188,6 +198,36 @@ class TestBudgetCheck:
         # At trial cap → exceeded
         status_trial = await budget_check(_MockSupa(), "doc-1", "trial")
         assert status_trial.exceeded
+
+    @pytest.mark.asyncio
+    async def test_old_cap_usage_no_longer_throttles_physician(self):
+        """Regression (2026-06-28 launch-day outage): a verified physician at the
+        PRIOR cap level (200k input / 50k output) must NOT be throttled. The old
+        caps 429'd Cue mid-event because the full clinical prompt + threaded history
+        is resent every turn. Caps were raised to a runaway-bug backstop only; a
+        human's day of use must never trip them. Do NOT lower below this."""
+        from services.cue.gate import budget_check
+
+        class _MockSupa:
+            class _Chain:
+                def table(self, *a, **kw):
+                    return self
+                def select(self, *a, **kw):
+                    return self
+                def eq(self, *a, **kw):
+                    return self
+                def maybe_single(self, *a, **kw):
+                    return self
+                def execute(self):
+                    # the level that throttled Hector + Aguirre on launch day
+                    return MagicMock(data={"input_tokens": 200_000, "output_tokens": 50_000})
+            def table(self, *a, **kw):
+                return self._Chain()
+
+        status = await budget_check(_MockSupa(), "doc-1", "physician")
+        assert not status.exceeded, (
+            "A physician at the old 200k/50k level must no longer be throttled"
+        )
 
 
 # ---------------------------------------------------------------------------

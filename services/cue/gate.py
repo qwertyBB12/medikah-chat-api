@@ -38,9 +38,19 @@ logger = logging.getLogger(__name__)
 # Tier daily caps (CUE-06 — physicians never charged; caps gate quota only)
 # ---------------------------------------------------------------------------
 
+# 2026-06-28 (launch day): the prior caps (physician 200k in / 50k out) throttled
+# real demo use to a few dozen turns — Cue resends the full clinical system prompt
+# as input EVERY turn, and since the launch-eve history-threading change each turn
+# also carries up to 20 prior messages, so per-turn input is large. Verified
+# physicians hit the daily 429 mid-event ("worked, then just stopped"). Per the
+# product call, Cue must NEVER tell a doctor "daily limit reached." These caps are
+# set effectively-unlimited for any human; the numbers remain only as a runaway-bug
+# backstop (e.g. a tool loop gone wrong), NOT a usage quota. Physicians are never
+# charged (CUE-06). Revisit only if abuse appears; do not lower to a human-reachable
+# value.
 _TIER_CAPS: dict[str, dict[str, int]] = {
-    "physician": {"input": 200_000, "output": 50_000},
-    "trial":     {"input":  20_000, "output":  5_000},
+    "physician": {"input": 100_000_000, "output": 25_000_000},
+    "trial":     {"input":  50_000_000, "output": 12_500_000},
 }
 
 _DEFAULT_TIER = "physician"
