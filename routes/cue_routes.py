@@ -71,6 +71,8 @@ from db.client import get_supabase
 from services.cue.adapter import create_adapter, select_model
 from services.cue.engine import run_cue_turn, run_cue_turn_streaming
 from services.cue.memory.judge import run_memory_judge
+from services.cue.memory.store import load_recent_notes
+from services.cue.memory.recall import assemble_recall_envelope
 from services.cue.gate import (
     BudgetStatus,
     KillSwitchResult,
@@ -1083,6 +1085,12 @@ async def _build_system_prompt(
         # (which is why Cue was English-only and said "How can I help?" — a phrase
         # the real clinical core explicitly forbids).
         prompt = assemble(locale=locale, surface="workspace")
+        # Phase 25 MEM-01: prepend the cross-session recall envelope (fail-open).
+        # load_recent_notes never raises; an empty list yields no envelope.
+        notes = load_recent_notes(supabase, physician_id, limit=10)
+        if notes:
+            recall = assemble_recall_envelope(notes, locale)
+            prompt = recall + "\n\n" + prompt
         return prompt + _build_date_directive(locale)
     except Exception as exc:
         logger.error(
