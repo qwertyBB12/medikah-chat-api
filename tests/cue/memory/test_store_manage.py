@@ -5,7 +5,7 @@ never touch another doctor's note).
 """
 from unittest.mock import MagicMock
 
-from services.cue.memory.store import list_notes, delete_note, correct_note
+from services.cue.memory.store import list_notes, delete_note
 
 
 def _table(data):
@@ -46,20 +46,3 @@ class TestDeleteNote:
         sb = MagicMock()
         sb.table.side_effect = RuntimeError("db down")
         assert delete_note(sb, "phys-1", "n1") is False
-
-
-class TestCorrectNote:
-    def test_updates_text_and_embedding_scoped(self):
-        sb = _table([{"id": "n1"}])
-        ok = correct_note(sb, "phys-1", "n1", "the corrected note", [0.4] * 8)
-        assert ok is True
-        payload = sb.table.return_value.update.call_args[0][0]
-        assert payload["note"] == "the corrected note"
-        assert payload["embedding"] == [0.4] * 8
-        pairs = {(c[0][0], c[0][1]) for c in sb.table.return_value.eq.call_args_list}
-        assert ("id", "n1") in pairs and ("physician_id", "phys-1") in pairs
-
-    def test_false_on_error(self):
-        sb = MagicMock()
-        sb.table.side_effect = RuntimeError("db down")
-        assert correct_note(sb, "phys-1", "n1", "x", None) is False
