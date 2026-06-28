@@ -393,9 +393,12 @@ async def availability_read(
         "[cue:tools] availability_read stub: physician=%s", physician_id
     )
     # Phase 22 stub — real implementation wired in a later HANDS-03 increment.
+    # Return a clean, jargon-free, bilingual "not connected yet" message: the
+    # grounding spine tells Cue to relay tool emptiness honestly, and the model
+    # may surface this string to the doctor (no internal phase markers).
     return (
-        "[Phase 22 stub] Availability data not yet integrated. "
-        "Availability integration will be available in the next release."
+        "La cuadrícula de disponibilidad aún no está conectada a tu espacio de "
+        "trabajo. / Your availability grid isn't connected to your workspace yet."
     )
 
 
@@ -424,7 +427,10 @@ async def inquiry_list_recent(
         limit,
     )
     # Phase 22 stub — real implementation wired in a later HANDS-04 increment.
+    # Clean, jargon-free, bilingual "not connected yet" message (see
+    # availability_read): the grounding spine has Cue relay this honestly rather
+    # than inventing a count of pending inquiries.
     return (
-        f"[Phase 22 stub] No inquiry data available yet (requested up to {limit}). "
-        f"Inquiry integration will be available in the next release."
+        "La cola de consultas de pacientes aún no está conectada a tu espacio de "
+        "trabajo. / Your patient-inquiry queue isn't connected to your workspace yet."
     )

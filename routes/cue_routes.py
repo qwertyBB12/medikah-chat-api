@@ -363,16 +363,29 @@ async def cue_chat(
         if cue_locale == "es":  # opening greeting always originates in Spanish
             directive = (
                 "El médico acaba de abrir el espacio de Cue. Salúdalo en UNA sola frase "
-                "breve, liderando con lo útil. " +
+                "breve. " +
                 (f"Dirígete a él o ella como «{address}». " if address else "") +
-                "No enumeres funciones. Sin signos de exclamación."
+                "No enumeres funciones. Sin signos de exclamación. "
+                # Anti-fabrication: this opening turn has NOT read any tool. The
+                # greeting must not assert live operational state (Issue 1, Dr. José
+                # 2026-06-28): no count of pending items, no «consultas administrativas»,
+                # no evento del calendario, ni mensaje de la bandeja. Lidera con un hilo
+                # que recuerdes de una sesión previa, o con un saludo simple y abierto.
+                "No afirmes ningún pendiente, conteo, evento del calendario ni mensaje "
+                "de la bandeja: todavía no los has consultado. Si no tienes un hilo "
+                "concreto que recuerdes, saluda de forma simple y abierta."
             )
         else:
             directive = (
                 "The physician just opened the Cue workspace. Greet them in ONE short "
-                "sentence, leading with the useful thing. " +
+                "sentence. " +
                 (f"Address them as \"{address}\". " if address else "") +
-                "Do not list capabilities. No exclamation marks."
+                "Do not list capabilities. No exclamation marks. "
+                # Anti-fabrication: see the Spanish branch — this opening turn reads no
+                # tool, so it must not assert live operational state.
+                "Do not assert any pending item, count, calendar event, or inbox "
+                "message — you have not checked them yet. Lead with a thread you "
+                "remember from a prior session, or a simple open greeting."
             )
         messages = [{"role": "user", "content": directive}]
     else:

@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
 
@@ -95,19 +95,46 @@ def _resolve_calendar(client: Any) -> Any:
     raise ValueError("No CalDAV calendar collection found for this physician")
 
 
-def _event_to_dict(event: Any) -> dict:
-    """Project a caldav event into a transient summary dict (UTC).
+def _format_event_dt(value: Any, tz: tzinfo) -> str:
+    """Render an iCal DTSTART/DTEND value in the physician's LOCAL timezone.
+
+    SOGo stores events in UTC and caldav `expand=True` normalizes to UTC, so the
+    raw value Cue would otherwise surface is a UTC wall-clock — a 9:00 AM
+    America/Mexico_City event reads as 15:00. Handing the model that string made
+    Cue report the wrong time (Dr. José report 2026-06-28 Issue 3). We convert to
+    `tz` here so the model always receives the doctor's local time.
+
+    - tz-aware datetime → converted to `tz`, rendered "YYYY-MM-DD HH:MM".
+    - naive datetime    → assumed UTC (HANDS-03 storage rule), then converted.
+    - all-day `date`    → "YYYY-MM-DD (all day)" (no time component).
+    - None / other      → "".
+    """
+    if value is None:
+        return ""
+    # datetime is a subclass of date — test datetime first.
+    if isinstance(value, datetime):
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return aware.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+    if isinstance(value, date):
+        return f"{value.isoformat()} (all day)"
+    return str(value)
+
+
+def _event_to_dict(event: Any, tz: tzinfo) -> dict:
+    """Project a caldav event into a transient summary dict (LOCAL time).
 
     Returns summary/dtstart/dtend/uid plus the cue_managed bool derived from the
-    X-CUE-MANAGED property. Bodies/attendees are never extracted.
+    X-CUE-MANAGED property. dtstart/dtend are rendered in the physician's local
+    zone `tz` (not UTC) — see _format_event_dt. Bodies/attendees are never
+    extracted.
     """
     comp = event.icalendar_component
     dtstart = comp.get("DTSTART")
     dtend = comp.get("DTEND")
     return {
         "summary": str(comp.get("SUMMARY", "")),
-        "dtstart": str(dtstart.dt) if dtstart is not None else "",
-        "dtend": str(dtend.dt) if dtend is not None else "",
+        "dtstart": _format_event_dt(dtstart.dt if dtstart is not None else None, tz),
+        "dtend": _format_event_dt(dtend.dt if dtend is not None else None, tz),
         "uid": str(comp.get("UID", "")),
         "cue_managed": comp.get(X_CUE_MANAGED) is not None,
     }
@@ -137,14 +164,16 @@ async def read_day(
 
     client = _cue_client(username, password)
     # caldav DAVClient supports the context-manager protocol; use it when present.
+    # Events are rendered in `tz` (the physician's local zone) so Cue surfaces the
+    # doctor's wall-clock, never the UTC value (Issue 3 fix).
     if hasattr(client, "__enter__"):
         with client as c:
             cal = _resolve_calendar(c)
             events = cal.search(start=start, end=end, event=True, expand=True)
-            return [_event_to_dict(e) for e in events]
+            return [_event_to_dict(e, tz) for e in events]
     cal = _resolve_calendar(client)
     events = cal.search(start=start, end=end, event=True, expand=True)
-    return [_event_to_dict(e) for e in events]
+    return [_event_to_dict(e, tz) for e in events]
 
 
 # ---------------------------------------------------------------------------
