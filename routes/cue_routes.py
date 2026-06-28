@@ -978,6 +978,49 @@ def _resolve_doctor_address(supabase, physician_id: str) -> str:
         return ""
 
 
+# Launch market default. SOGo stores each physician's calendar in their own
+# timezone (e.g. America/Mexico_City for Mexico). We resolve "today"/"tomorrow"
+# in this zone so calendar_read_day queries the right day.
+_DEFAULT_CUE_TIMEZONE = "America/Mexico_City"
+
+
+def _build_date_directive(locale: str, tz_name: str = _DEFAULT_CUE_TIMEZONE) -> str:
+    """Inject the current date so the model can resolve relative dates.
+
+    Without this, the model has no idea what 'today' is and guesses (often its
+    training-cutoff year), so calendar_read_day('tomorrow') queries the wrong
+    day and returns "no events". See the Aguirre 2026-06-27 calendar bug.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        from datetime import timezone as _tz
+        now = datetime.now(_tz.utc)
+        tz_name = "UTC"
+
+    iso = now.strftime("%Y-%m-%d")
+    pretty = now.strftime("%A, %B %d, %Y")
+    hhmm = now.strftime("%H:%M")
+
+    if locale == "es":
+        return (
+            f"\n\nFecha y hora actual: {pretty}, {hhmm} ({tz_name}). "
+            f"Hoy es {iso}. Cuando el médico diga 'hoy', usa esta fecha; "
+            f"'mañana' es el día siguiente y 'ayer' el anterior. "
+            f"Pasa siempre las fechas a las herramientas de calendario en formato "
+            f"YYYY-MM-DD resueltas a partir de esta referencia."
+        )
+    return (
+        f"\n\nCurrent date and time: {pretty}, {hhmm} ({tz_name}). "
+        f"Today is {iso}. When the physician says 'today', use this date; "
+        f"'tomorrow' is the next calendar day and 'yesterday' the previous one. "
+        f"Always pass dates to calendar tools as YYYY-MM-DD resolved from this reference."
+    )
+
+
 async def _build_system_prompt(
     physician_id: str,
     locale: str,
@@ -1017,7 +1060,7 @@ async def _build_system_prompt(
         # (which is why Cue was English-only and said "How can I help?" — a phrase
         # the real clinical core explicitly forbids).
         prompt = assemble(locale=locale, surface="workspace")
-        return prompt
+        return prompt + _build_date_directive(locale)
     except Exception as exc:
         logger.error(
             "[cue] assemble() failed for physician=%s locale=%s — using fallback prompt: %s",
@@ -1025,4 +1068,5 @@ async def _build_system_prompt(
             locale,
             exc,
         )
-        return _FALLBACK_PROMPT_ES if locale == "es" else _FALLBACK_PROMPT_EN
+        fallback = _FALLBACK_PROMPT_ES if locale == "es" else _FALLBACK_PROMPT_EN
+        return fallback + _build_date_directive(locale)
