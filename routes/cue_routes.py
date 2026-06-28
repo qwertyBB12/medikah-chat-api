@@ -1141,14 +1141,18 @@ async def _build_system_prompt(
         # the real clinical core explicitly forbids).
         prompt = assemble(locale=locale, surface="workspace")
         # Phase 25 MEM-01: prepend the cross-session recall envelope (fail-open).
+        # Recall is gated on the SAME aviso as writes — no consent means no notes
+        # exist anyway, so we skip the embedding API call entirely (avoids paying
+        # an embed per turn for every doctor until the consent UI ships).
         # Slice 2: embed the query (fail-open) for SEMANTIC recall — the right
         # memories for this moment; load_relevant_notes falls back to recency when
         # there is no query or nothing is embedded yet. Never raises.
-        query_embedding = await embed_text(query_text) if query_text else None
-        notes = load_relevant_notes(supabase, physician_id, query_embedding, limit=10)
-        if notes:
-            recall = assemble_recall_envelope(notes, locale)
-            prompt = recall + "\n\n" + prompt
+        if has_aviso_ack(supabase, physician_id):
+            query_embedding = await embed_text(query_text) if query_text else None
+            notes = load_relevant_notes(supabase, physician_id, query_embedding, limit=10)
+            if notes:
+                recall = assemble_recall_envelope(notes, locale)
+                prompt = recall + "\n\n" + prompt
         return prompt + _build_date_directive(locale)
     except Exception as exc:
         logger.error(
