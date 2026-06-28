@@ -70,6 +70,7 @@ from slowapi import Limiter
 from db.client import get_supabase
 from services.cue.adapter import create_adapter, select_model
 from services.cue.engine import run_cue_turn, run_cue_turn_streaming
+from services.cue.memory.judge import run_memory_judge
 from services.cue.gate import (
     BudgetStatus,
     KillSwitchResult,
@@ -507,7 +508,19 @@ async def cue_chat(
                     len(last_user_msg),
                     len(assistant_text),
                 )
-                # TODO (Phase 25 MEM-02/MEM-06): call run_memory_judge + run_flag_judge
+                # Phase 25 MEM-02: cross-session memory judge (non-blocking, never-throws).
+                # physician_name resolves via the same helper the greeting uses; None on miss.
+                try:
+                    physician_name = _resolve_doctor_address(supabase, physician_id)
+                except Exception:
+                    physician_name = None
+                await run_memory_judge(
+                    supabase,
+                    physician_id,
+                    {"user": last_user_msg, "assistant": assistant_text},
+                    body.locale,
+                    physician_name,
+                )
             except Exception as judge_exc:
                 # CUE-04b: swallow judge exceptions — never surface as 500
                 logger.error(
