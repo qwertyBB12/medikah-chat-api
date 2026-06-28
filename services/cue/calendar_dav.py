@@ -37,7 +37,13 @@ import logging
 import os
 import uuid
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Optional
+
+# Launch market default. SOGo day boundaries are the physician's LOCAL day; an
+# evening event in America/Mexico_City rolls into the next UTC day, so a naive
+# UTC day window would miss it. We build the window in this zone, then convert.
+_DEFAULT_CAL_TIMEZONE = "America/Mexico_City"
 
 logger = logging.getLogger(__name__)
 
@@ -111,17 +117,23 @@ async def read_day(
     username: str,
     password: str,
     date_str: str,
+    tz_name: str = _DEFAULT_CAL_TIMEZONE,
 ) -> list[dict]:
     """List the physician's events on `date_str` (HANDS-03).
 
     Resolves the per-physician 'personal' collection (HANDS-10), searches the
-    UTC day window, and returns transient summary dicts including the
-    cue_managed flag. Storage/search are UTC; the surface renders in the
-    physician's local timezone.
+    physician's LOCAL day window (converted to UTC for the query), and returns
+    transient summary dicts including the cue_managed flag. Building the window
+    in the local zone ensures evening events (which roll into the next UTC day)
+    are included — the Aguirre 2026-06-27 calendar bug.
     """
     d = date.fromisoformat(date_str)
-    start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
-    end = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz).astimezone(timezone.utc)
+    end = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz).astimezone(timezone.utc)
 
     client = _cue_client(username, password)
     # caldav DAVClient supports the context-manager protocol; use it when present.
