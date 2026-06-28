@@ -71,7 +71,13 @@ from db.client import get_supabase
 from services.cue.adapter import create_adapter, select_model
 from services.cue.engine import run_cue_turn, run_cue_turn_streaming
 from services.cue.memory.judge import run_memory_judge
-from services.cue.memory.store import load_relevant_notes, has_aviso_ack
+from services.cue.memory.store import (
+    load_relevant_notes,
+    has_aviso_ack,
+    list_notes,
+    delete_note,
+    correct_note,
+)
 from services.cue.memory.recall import assemble_recall_envelope
 from services.cue.memory.embeddings import embed as embed_text
 from services.cue.gate import (
@@ -168,6 +174,12 @@ class CueTtsRequest(BaseModel):
 
     text: str
     locale: str = "es"               # "en" | "es" — physicians Spanish-first
+
+
+class CueMemoryCorrectRequest(BaseModel):
+    """Body for PATCH /cue/memory/{note_id} — the doctor edits a remembered note."""
+
+    note: str
 
 
 # POST /cue/transcribe accepts a raw audio body (no JSON model). Cap at 5MB —
@@ -1020,6 +1032,53 @@ async def post_memory_aviso_ack(
             logger.error("[cue-memory] aviso-ack upsert failed for %s: %s", physician_id, exc)
             raise HTTPException(status_code=500, detail="Could not record acknowledgment")
     return {"acknowledged": True}
+
+
+# ---------------------------------------------------------------------------
+# Doctor-visible / editable memory (Slice 3 — MEM transparency + data rights).
+# Everything is scoped to auth.physician_id (CUE-11); the doctor can see, correct,
+# delete, and export exactly what Cue remembers about them — the LFPDPPP posture.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/memory")
+async def get_memory_notes(
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """List everything Cue remembers about this physician (also serves export)."""
+    supabase = get_supabase()
+    return {"notes": list_notes(supabase, auth.physician_id)}
+
+
+@router.delete("/memory/{note_id}")
+async def delete_memory_note(
+    note_id: str,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """Forget one note. Scoped to the physician (a doctor can only delete their own)."""
+    supabase = get_supabase()
+    ok = delete_note(supabase, auth.physician_id, note_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Could not delete the note")
+    return {"deleted": True}
+
+
+@router.patch("/memory/{note_id}")
+async def correct_memory_note(
+    note_id: str,
+    body: CueMemoryCorrectRequest,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """Correct a note's text. Re-embeds so semantic recall reflects the edit."""
+    supabase = get_supabase()
+    text = (body.note or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Note text cannot be empty")
+    new_embedding = await embed_text(text)
+    ok = correct_note(supabase, auth.physician_id, note_id, text, new_embedding)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Could not update the note")
+    return {"updated": True}
 
 
 # ---------------------------------------------------------------------------
