@@ -144,6 +144,66 @@ def find_similar_note(supabase, physician_id: str, embedding, category: str, max
         return None
 
 
+def list_notes(supabase, physician_id: str) -> list[dict]:
+    """Full note rows for the doctor-visible management UI (CUE-11 scoped).
+    Never raises — returns [] on any error."""
+    if supabase is None:
+        return []
+    try:
+        res = (
+            supabase.table("cue_memory_notes")
+            .select("id, note, category, source_tag, salience, appended_at, updated_at")
+            .eq("physician_id", physician_id)
+            .order("updated_at", desc=True)
+            .execute()
+        )
+        return list(res.data or [])
+    except Exception as exc:
+        logger.warning("[cue-memory] list_notes failed for %s: %s", physician_id, exc)
+        return []
+
+
+def delete_note(supabase, physician_id: str, note_id: str) -> bool:
+    """Delete a note the doctor owns. Scoped by BOTH id AND physician_id (IDOR guard).
+    Returns True on success, False on error."""
+    if supabase is None:
+        return False
+    try:
+        (
+            supabase.table("cue_memory_notes")
+            .delete()
+            .eq("id", note_id)
+            .eq("physician_id", physician_id)
+            .execute()
+        )
+        return True
+    except Exception as exc:
+        logger.error("[cue-memory] delete_note failed for %s/%s: %s", physician_id, note_id, exc)
+        return False
+
+
+def correct_note(supabase, physician_id: str, note_id: str, note: str, embedding) -> bool:
+    """Doctor edits a note's text (re-embedded by the caller). Scoped by id AND
+    physician_id (IDOR guard). Returns True on success, False on error."""
+    if supabase is None:
+        return False
+    try:
+        payload = {"note": note, "updated_at": datetime.now(timezone.utc).isoformat()}
+        if embedding is not None:
+            payload["embedding"] = embedding
+        (
+            supabase.table("cue_memory_notes")
+            .update(payload)
+            .eq("id", note_id)
+            .eq("physician_id", physician_id)
+            .execute()
+        )
+        return True
+    except Exception as exc:
+        logger.error("[cue-memory] correct_note failed for %s/%s: %s", physician_id, note_id, exc)
+        return False
+
+
 def update_note(supabase, note_id: str, note: str, embedding, salience: int) -> None:
     """Update a note in place (consolidation): refresh text, embedding, salience,
     and updated_at so the living profile replaces a near-duplicate. Never raises."""
