@@ -219,7 +219,7 @@ def _request_ip_ua(request: Request) -> tuple[Optional[str], Optional[str]]:
 
 
 @router.post("/chat")
-@limiter.limit("20/minute")  # CUE-04c: per-physician key via _physician_key_func
+@limiter.limit("120/minute")  # CUE-04c: per-physician abuse fuse, NOT a usage cap — never throttle a doctor (2026-06-28)
 async def cue_chat(
     request: Request,
     body: CueChatRequest,
@@ -659,7 +659,7 @@ def _write_confirm_audit(
 
 
 @router.post("/calendar/confirm-write")
-@limiter.limit("20/minute")  # per-physician key via _physician_key_func
+@limiter.limit("120/minute")  # per-physician abuse fuse, NOT a usage cap (2026-06-28)
 async def cue_confirm_write(
     request: Request,
     body: CueConfirmWriteRequest,
@@ -773,7 +773,7 @@ async def cue_confirm_write(
 
 
 @router.delete("/credential")
-@limiter.limit("5/minute")  # per-physician key via _physician_key_func
+@limiter.limit("60/minute")  # per-physician abuse fuse, NOT a usage cap (2026-06-28)
 async def cue_revoke_credential(
     request: Request,
     auth: AuthenticatedPhysician = Depends(authenticated_physician),
@@ -810,7 +810,7 @@ async def cue_revoke_credential(
 
 
 @router.post("/transcribe")
-@limiter.limit("20/minute")  # per-physician key via _physician_key_func
+@limiter.limit("300/minute")  # voice utterances fire often; per-physician abuse fuse only, never throttle a doctor (2026-06-28)
 async def cue_transcribe(
     request: Request,
     auth: AuthenticatedPhysician = Depends(authenticated_physician),
@@ -869,7 +869,7 @@ async def cue_transcribe(
 
 
 @router.post("/tts")
-@limiter.limit("20/minute")  # per-physician key via _physician_key_func
+@limiter.limit("600/minute")  # streaming TTS fires per-sentence; per-physician abuse fuse only, never throttle a doctor (2026-06-28)
 async def cue_tts(
     request: Request,
     body: CueTtsRequest,
