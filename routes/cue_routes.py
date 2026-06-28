@@ -289,12 +289,22 @@ async def cue_chat(
         raise HTTPException(status_code=429, detail=detail)
 
     # ------------------------------------------------------------------
+    # Cue ALWAYS originates in Spanish (2026-06-28 product call). The opening
+    # greeting is forced to Spanish regardless of the incoming locale; from there
+    # the language directive in the system prompt mirrors the doctor turn-by-turn,
+    # so Cue switches to English the moment the doctor writes/speaks English.
+    # FUTURE: derive the origination locale from the doctor's onboarding/preferred
+    # language instead of hard-defaulting to Spanish.
+    # ------------------------------------------------------------------
+    cue_locale = "es" if body.opening else body.locale
+
+    # ------------------------------------------------------------------
     # GATE 5: Context assembly (Plan 22-03 assemble())
     # Scoped to physician_id from session (CUE-11).
     # ------------------------------------------------------------------
     system_prompt: str = await _build_system_prompt(
         physician_id=physician_id,
-        locale=body.locale,
+        locale=cue_locale,
         supabase=supabase,
     )
 
@@ -326,7 +336,7 @@ async def cue_chat(
     # system_prompt. A greeting never proposes a write → no pending_confirm.
     if body.opening:
         address = _resolve_doctor_address(supabase, physician_id)
-        if body.locale == "es":
+        if cue_locale == "es":  # opening greeting always originates in Spanish
             directive = (
                 "El médico acaba de abrir el espacio de Cue. Salúdalo en UNA sola frase "
                 "breve, liderando con lo útil. " +
