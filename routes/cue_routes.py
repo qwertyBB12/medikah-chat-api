@@ -71,7 +71,7 @@ from db.client import get_supabase
 from services.cue.adapter import create_adapter, select_model
 from services.cue.engine import run_cue_turn, run_cue_turn_streaming
 from services.cue.memory.judge import run_memory_judge
-from services.cue.memory.store import load_recent_notes
+from services.cue.memory.store import load_recent_notes, has_aviso_ack
 from services.cue.memory.recall import assemble_recall_envelope
 from services.cue.gate import (
     BudgetStatus,
@@ -126,6 +126,11 @@ router = APIRouter(prefix="/cue", tags=["cue"])
 # ---------------------------------------------------------------------------
 
 _MAX_MESSAGES = 10  # AI-SPEC §4 context-window strategy: hard cap at 10 turns
+
+# PATCH-03 — current Cue memory aviso de privacidad version. Bump when the notice
+# copy materially changes; a new version requires re-acknowledgment before the
+# memory judge will write any new note (cross-session memory stays dark until ack).
+AVISO_VERSION = "2026-06-28"
 
 
 class CueChatRequest(BaseModel):
@@ -966,6 +971,44 @@ async def cue_health() -> dict:
         "router": "cue",
         "supabase": supabase is not None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cue memory aviso de privacidad (PATCH-03) — the doctor-level consent gate that
+# unlocks cross-session memory writes. LFPDPPP: stated purpose + acknowledgment.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/memory/aviso")
+async def get_memory_aviso(
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """Return whether this physician has acknowledged the memory aviso."""
+    supabase = get_supabase()
+    physician_id: str = auth.physician_id  # CUE-11: identity from session, never body
+    return {
+        "acknowledged": has_aviso_ack(supabase, physician_id),
+        "aviso_version": AVISO_VERSION,
+    }
+
+
+@router.post("/memory/aviso-ack")
+async def post_memory_aviso_ack(
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """Record the physician's acknowledgment of the memory aviso (PATCH-03 unlock)."""
+    supabase = get_supabase()
+    physician_id: str = auth.physician_id  # CUE-11
+    if supabase is not None:
+        try:
+            supabase.table("cue_memory_consent").upsert({
+                "physician_id": physician_id,
+                "aviso_version": AVISO_VERSION,
+            }).execute()
+        except Exception as exc:
+            logger.error("[cue-memory] aviso-ack upsert failed for %s: %s", physician_id, exc)
+            raise HTTPException(status_code=500, detail="Could not record acknowledgment")
+    return {"acknowledged": True}
 
 
 # ---------------------------------------------------------------------------
