@@ -326,7 +326,7 @@ ANCHORS: dict[str, AnchorMetadata] = {
     "bilingual-cue-clave": AnchorMetadata(
         section="bilingual",
         languages=("en", "es"),
-        summary="Cue in English, Clave in Spanish. Never mix languages within a response.",
+        summary="Always 'Cue' — the name is identical in English and Spanish, never translated. Never mix languages within a response.",
     ),
 }
 

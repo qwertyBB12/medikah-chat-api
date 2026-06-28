@@ -65,6 +65,7 @@ prose (e.g., "redirect toward the next actionable step"). The brand form "NeXT"
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -293,4 +294,45 @@ def test_no_brand_tokens_in_self_knowledge() -> None:
         f"Brand bleed in build_self_knowledge('es') output.\n"
         f"Forbidden tokens found: {es_hits}\n"
         f"Remove BeNeXT ecosystem vessel names from self_knowledge.py (PERS-06 / D10)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# D10-F: Assistant name is "Cue" in every locale — never "Clave"
+# ---------------------------------------------------------------------------
+
+# Capitalized proper-noun form only. The common Spanish word "clave" (lowercase,
+# e.g. "preguntas clave", "en clave de avance") is legitimate and must NOT trip
+# this guard — so we match \bClave\b case-sensitively.
+_CLAVE_NAME_PATTERN = re.compile(r"\bClave\b")
+
+
+def test_assistant_name_is_cue_not_clave() -> None:
+    """
+    D10-F: Naming regression guard. The assistant's name is "Cue" in EVERY
+    locale and is NEVER translated to "Clave" (the old "Cue (EN) / Clave (ES)"
+    dual-name was removed 2026-06-28). Cue is the product name everywhere — it is
+    not localized and not a nod to "Q".
+
+    Matches the capitalized proper-noun \bClave\b so the common Spanish word
+    "clave" (key/clue) does not false-positive.
+    """
+    for locale in ("en", "es"):
+        out = assemble(locale=locale, surface="workspace")
+        assert not _CLAVE_NAME_PATTERN.search(out), (
+            f"Naming regression: the assistant is referred to as 'Clave' in "
+            f"assemble(locale={locale!r}). The name is 'Cue' in every language, "
+            f"never translated."
+        )
+        sk = build_self_knowledge(locale)
+        assert "Cue" in sk, f"self_knowledge({locale!r}) must name the assistant 'Cue'."
+        assert not _CLAVE_NAME_PATTERN.search(sk), (
+            f"self_knowledge({locale!r}) still contains the name 'Clave'."
+        )
+
+    assert not _CLAVE_NAME_PATTERN.search(_EN_CORE.read_text(encoding="utf-8")), (
+        "core/en.md still contains the name 'Clave'."
+    )
+    assert not _CLAVE_NAME_PATTERN.search(_ES_CORE.read_text(encoding="utf-8")), (
+        "core/es.md still contains the name 'Clave'."
     )
