@@ -24,7 +24,8 @@ from anthropic import AsyncAnthropic
 
 from services.cue.adapter import select_model
 from .redact import redact_free_text
-from .store import has_aviso_ack, insert_note
+from .embeddings import embed
+from .store import has_aviso_ack, insert_note, find_similar_note, update_note
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,21 @@ async def run_memory_judge(
         if not redacted.strip():
             return
 
-        insert_note(supabase, physician_id, redacted, category, locale)
+        # Slice 2: embed (fail-open) → consolidate a near-duplicate if one exists,
+        # else insert. A null embedding (no provider) stores a recency-only note.
+        embedding = await embed(redacted)
+        if embedding is not None:
+            similar = find_similar_note(supabase, physician_id, embedding, category)
+            if similar is not None:
+                update_note(
+                    supabase,
+                    similar["id"],
+                    redacted,
+                    embedding,
+                    (similar.get("salience", 1) or 1) + 1,
+                )
+                return
+        insert_note(supabase, physician_id, redacted, category, locale, embedding)
 
     except Exception as exc:  # CUE-04b: swallow everything
         logger.error("[cue-memory] run_memory_judge failed for %s — swallowed: %s", physician_id, exc)
