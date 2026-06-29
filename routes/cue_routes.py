@@ -133,6 +133,22 @@ router = APIRouter(prefix="/cue", tags=["cue"])
 
 _MAX_MESSAGES = 10  # AI-SPEC §4 context-window strategy: hard cap at 10 turns
 
+
+def _select_turn_model(*, opening: bool) -> str:
+    """Pick the model tier for a turn (diagnosis 2026-06-28).
+
+    The opening greeting is a single warm sentence — no tools, no clinical
+    reasoning — so the FAST brain (Haiku) keeps the first impression instant.
+    Every CONVERSATIONAL / clinical + tool turn uses the documented reasoning
+    brain (Sonnet, the adapter's _DEFAULT_TIER): Haiku — which the adapter
+    reserves for background memory/flag judges — under-follows the ~6-7k-token
+    clinical persona and fumbles the multi-step scheduling date/tool-arg math,
+    which read to doctors as "not intelligent / confused" and mis-booked blocks.
+    Sonnet's added input prefill is offset by prompt caching (the route threads
+    system_cache_strategy="ephemeral").
+    """
+    return select_model(tier="haiku" if opening else "sonnet")
+
 # PATCH-03 — current Cue memory aviso de privacidad version. Bump when the notice
 # copy materially changes; a new version requires re-acknowledgment before the
 # memory judge will write any new note (cross-session memory stays dark until ack).
@@ -335,11 +351,13 @@ async def cue_chat(
     # ------------------------------------------------------------------
     # GATE 6: Model selection (tier-gated; physicians never charged)
     # ------------------------------------------------------------------
-    # Workspace chat uses the FAST brain (Haiku) for BeNeXT-parity latency — the
-    # companion engine BeNeXT ships on Haiku too. The clinical-deference anchor is
-    # baked into the core prompt regardless of model, so scope-of-practice holds.
-    # The high-stakes diagnosis surface (Phase 24) selects sonnet/opus via tier.
-    model = select_model(tier="haiku")
+    # Tier per turn type (see _select_turn_model): the opening greeting stays on
+    # the FAST brain (Haiku) for an instant first impression; every conversational
+    # / clinical + tool turn runs on the documented reasoning brain (Sonnet), whose
+    # added prefill is offset by prompt caching below. The clinical-deference anchor
+    # is baked into the core prompt regardless of model, so scope-of-practice holds;
+    # the high-stakes diagnosis surface (Phase 24) selects sonnet/opus via tier.
+    model = _select_turn_model(opening=body.opening)
 
     # ------------------------------------------------------------------
     # Tool loop + stream — Plan 22-06 (CUE-03) + Phase-23 TTFT streaming
@@ -439,6 +457,8 @@ async def cue_chat(
                     system_prompt=system_prompt,
                     messages=messages,
                     max_tokens=body.max_tokens,
+                    # Cache the large static clinical system prefix (TTFT win).
+                    system_cache_strategy="ephemeral",
                 ):
                     if delta:
                         _log_ttft()
@@ -458,6 +478,10 @@ async def cue_chat(
                 physician_id=physician_id,
                 locale=body.locale,
                 max_tokens=body.max_tokens,
+                # Cache the large static clinical system prefix so it is not
+                # re-prefilled on every turn AND every tool round (TTFT win;
+                # offsets the Sonnet upgrade above).
+                system_cache_strategy="ephemeral",
             ):
                 etype = ev.get("type")
                 if etype == "delta":

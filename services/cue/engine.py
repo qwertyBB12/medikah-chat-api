@@ -65,7 +65,7 @@ import json
 import logging
 from typing import Any, AsyncIterator, Optional
 
-from services.cue.adapter import CueModelAdapter, CueNeutralTool
+from services.cue.adapter import CueModelAdapter, CueNeutralTool, SystemCacheStrategy
 from services.cue.tools.registry import NEUTRAL_TOOLS, dispatch_tool
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,7 @@ async def run_cue_turn_streaming(
     max_tokens: int = 1024,
     max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
     tools: Optional[list[CueNeutralTool]] = None,
+    system_cache_strategy: SystemCacheStrategy = None,
 ) -> AsyncIterator[dict]:
     """
     Drive the tool_use / tool_result agentic loop, STREAMING text deltas (CUE-03
@@ -172,6 +173,7 @@ async def run_cue_turn_streaming(
             messages=working_messages,
             tools=active_tools,
             max_tokens=tool_detection_max_tokens,
+            system_cache_strategy=system_cache_strategy,
         ):
             etype = ev.get("type")
             if etype == "text":
@@ -372,6 +374,7 @@ async def run_cue_turn(
     physician_id: str,               # from verified session — NEVER from tool args (CUE-11)
     max_tokens: int = 1024,
     max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
+    system_cache_strategy: SystemCacheStrategy = None,
 ) -> tuple[str, dict, Optional[dict]]:
     """
     Non-streaming wrapper over run_cue_turn_streaming() — preserves the original
@@ -399,6 +402,7 @@ async def run_cue_turn(
         physician_id=physician_id,
         max_tokens=max_tokens,
         max_tool_rounds=max_tool_rounds,
+        system_cache_strategy=system_cache_strategy,
     ):
         if ev.get("type") == "done":
             final_text = ev.get("final_text", "")
