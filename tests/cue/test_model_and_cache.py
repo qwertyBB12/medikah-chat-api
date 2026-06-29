@@ -15,7 +15,9 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from routes.cue_routes import _select_turn_model
+import re
+
+from routes.cue_routes import _build_date_directive, _select_turn_model
 from services.cue.adapter import (
     CueModelAdapter,
     CueNeutralTool,
@@ -41,6 +43,17 @@ def test_opening_greeting_stays_on_fast_haiku_brain() -> None:
     # The greeting is a single warm sentence — the fast brain keeps the first
     # impression instant; quality matters far less for one templated sentence.
     assert _select_turn_model(opening=True) == select_model(tier="haiku")
+
+
+def test_date_directive_has_no_live_minute_for_cache_stability() -> None:
+    # The date directive is part of the cached system prefix. A live HH:MM would
+    # change the bytes every minute and defeat the prompt cache (the Sonnet
+    # "takes forever" latency). It must carry the date + a coarse part-of-day only.
+    for loc in ("es", "en"):
+        d = _build_date_directive(loc, "America/Mexico_City")
+        assert not re.search(r"\d{1,2}:\d{2}", d), f"date directive must not embed a live HH:MM ({loc})"
+    assert "Hoy es" in _build_date_directive("es", "America/Mexico_City")
+    assert "Today is" in _build_date_directive("en", "America/Mexico_City")
 
 
 # ---------------------------------------------------------------------------
