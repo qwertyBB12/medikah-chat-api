@@ -24,6 +24,8 @@ new backend-owned tables/columns are added.
 from __future__ import annotations
 
 import logging
+import os
+import urllib.request
 
 from db.client import get_supabase
 
@@ -83,3 +85,44 @@ def log_schema_status(status: dict) -> None:
         "migrations in medikah-chat-api/db/migrations/ to prod",
         len(status.get("problems", [])),
     )
+
+
+def notify_schema_problems(status: dict) -> None:
+    """Push a one-shot phone alert via ntfy when schema objects are missing.
+
+    Set ``NTFY_ALERT_URL`` in the environment (Render) to your ntfy topic URL,
+    e.g. ``https://ntfy.sh/<your-unguessable-topic>`` — the same topic the
+    mail-ops Kuma stack already pushes to. Optional ``NTFY_ALERT_TOKEN`` adds a
+    Bearer token for reserved/self-hosted topics. No-op when schema is OK or the
+    URL isn't configured. Uses stdlib urllib so it adds no dependency.
+    """
+    if not status.get("checked") or status.get("ok"):
+        return
+    url = os.getenv("NTFY_ALERT_URL")
+    if not url:
+        logger.warning(
+            "[schema-check] schema is broken but NTFY_ALERT_URL is unset — "
+            "no push alert sent (set it in Render to your ntfy topic URL)"
+        )
+        return
+
+    problems = status.get("problems", [])
+    body = (
+        "Medikah API booted with MISSING DB schema — apply pending backend "
+        "migrations to prod.\n\n" + "\n".join(problems)
+    ).encode("utf-8")
+    headers = {
+        "Title": "Medikah API: schema-check FAILED",
+        "Priority": "urgent",
+        "Tags": "rotating_light,database",
+    }
+    token = os.getenv("NTFY_ALERT_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        urllib.request.urlopen(req, timeout=8)  # noqa: S310 — operator-set URL
+        logger.info("[schema-check] pushed schema-failure alert to ntfy")
+    except Exception:
+        logger.exception("[schema-check] failed to push ntfy alert")

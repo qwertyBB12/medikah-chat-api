@@ -135,10 +135,11 @@ async def _verify_required_schema():
     boot and an entry on /health. Non-fatal — the rest of the API keeps serving.
     """
     global _schema_status
-    from db.schema_check import check_schema, log_schema_status
+    from db.schema_check import check_schema, log_schema_status, notify_schema_problems
     try:
         _schema_status = check_schema()
         log_schema_status(_schema_status)
+        notify_schema_problems(_schema_status)  # ntfy push if NTFY_ALERT_URL set
     except Exception:
         logger.exception("[schema-check] failed to run; continuing")
 
