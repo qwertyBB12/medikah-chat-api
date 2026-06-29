@@ -1175,18 +1175,26 @@ def _build_date_directive(locale: str, tz_name: str = _DEFAULT_CUE_TIMEZONE) -> 
 
     iso = now.strftime("%Y-%m-%d")
     pretty = now.strftime("%A, %B %d, %Y")
-    hhmm = now.strftime("%H:%M")
-
+    # PERF (diagnosis 2026-06-28): use a COARSE part-of-day, not the live HH:MM.
+    # The date directive is part of the cached system prefix; embedding the live
+    # minute made the prefix change every minute, so the Anthropic prompt cache
+    # never reused the ~6-7k-token persona across turns and every Sonnet turn paid
+    # full prefill (the "takes forever" latency). Part-of-day is stable for hours,
+    # so follow-up turns hit the cache. Date resolution ('today/tomorrow') only
+    # needs the date, not the minute.
+    h = now.hour
     if locale == "es":
+        part = "por la mañana" if 5 <= h < 12 else "por la tarde" if 12 <= h < 19 else "por la noche"
         return (
-            f"\n\nFecha y hora actual: {pretty}, {hhmm} ({tz_name}). "
+            f"\n\nFecha actual: {pretty} ({tz_name}), {part}. "
             f"Hoy es {iso}. Cuando el médico diga 'hoy', usa esta fecha; "
             f"'mañana' es el día siguiente y 'ayer' el anterior. "
             f"Pasa siempre las fechas a las herramientas de calendario en formato "
             f"YYYY-MM-DD resueltas a partir de esta referencia."
         )
+    part = "in the morning" if 5 <= h < 12 else "in the afternoon" if 12 <= h < 19 else "in the evening"
     return (
-        f"\n\nCurrent date and time: {pretty}, {hhmm} ({tz_name}). "
+        f"\n\nCurrent date: {pretty} ({tz_name}), {part}. "
         f"Today is {iso}. When the physician says 'today', use this date; "
         f"'tomorrow' is the next calendar day and 'yesterday' the previous one. "
         f"Always pass dates to calendar tools as YYYY-MM-DD resolved from this reference."
