@@ -104,11 +104,18 @@ NEUTRAL_TOOLS: list[CueNeutralTool] = [
             "properties": {
                 "start_iso": {
                     "type": "string",
-                    "description": "ISO 8601 datetime for the block start (UTC).",
+                    "description": (
+                        "ISO 8601 datetime for the block start, in the physician's "
+                        "LOCAL timezone (the same zone as the current-time reference "
+                        "above), e.g. '2026-07-01T15:00:00'. No offset/'Z' needed."
+                    ),
                 },
                 "end_iso": {
                     "type": "string",
-                    "description": "ISO 8601 datetime for the block end (UTC).",
+                    "description": (
+                        "ISO 8601 datetime for the block end, in the physician's "
+                        "LOCAL timezone, e.g. '2026-07-01T15:30:00'. No offset/'Z' needed."
+                    ),
                 },
                 "title": {
                     "type": "string",
@@ -133,11 +140,17 @@ NEUTRAL_TOOLS: list[CueNeutralTool] = [
             "properties": {
                 "start_iso": {
                     "type": "string",
-                    "description": "ISO 8601 datetime for the range start (UTC).",
+                    "description": (
+                        "ISO 8601 datetime for the range start, in the physician's "
+                        "LOCAL timezone (no offset/'Z' needed)."
+                    ),
                 },
                 "end_iso": {
                     "type": "string",
-                    "description": "ISO 8601 datetime for the range end (UTC).",
+                    "description": (
+                        "ISO 8601 datetime for the range end, in the physician's "
+                        "LOCAL timezone (no offset/'Z' needed)."
+                    ),
                 },
             },
             "required": ["start_iso", "end_iso"],

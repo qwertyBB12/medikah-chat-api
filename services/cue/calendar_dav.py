@@ -186,15 +186,24 @@ async def read_day(
 # ---------------------------------------------------------------------------
 
 
-def _to_utc(iso: str) -> datetime:
+def _to_utc(iso: str, default_tz: str = "UTC") -> datetime:
     """Parse an ISO 8601 string and convert to a tz-aware UTC datetime.
 
-    A naive datetime (no offset) is assumed to already be UTC. Storage is always
-    UTC (HANDS-03); the surface renders in the physician's local timezone.
+    An OFFSET-AWARE value keeps its own offset. A NAIVE value (no offset) is
+    interpreted as `default_tz`: the physician's scheduling timezone for
+    model-supplied block/clear times — the model is fed, and emits, LOCAL time
+    (registry.py block/clear schema + the date directive) — or UTC for
+    storage-origin values. Storage is always UTC (HANDS-03); the surface renders
+    in the physician's local timezone.
+
+    Before this took a tz, naive local times (e.g. "15:00") were stored as
+    "15:00Z" — a 6h shift for a Mexico City doctor (diagnosis 2026-06-28).
     """
     dt = datetime.fromisoformat(iso)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(
+            tzinfo=timezone.utc if default_tz == "UTC" else ZoneInfo(default_tz)
+        )
     return dt.astimezone(timezone.utc)
 
 
@@ -208,11 +217,15 @@ def _is_cue_managed(comp: Any) -> bool:
     return comp.get(X_CUE_MANAGED) is not None
 
 
-def _build_block_calendar(uid: str, start_iso: str, end_iso: str, title: str) -> str:
+def _build_block_calendar(
+    uid: str, start_iso: str, end_iso: str, title: str, default_tz: str = "UTC"
+) -> str:
     """Serialize a single X-CUE-MANAGED VEVENT to an iCal string (UTC).
 
     Uses the icalendar library (never hand-rolled .ics concatenation) so line
-    folding, escaping, and VEVENT structure are RFC-correct.
+    folding, escaping, and VEVENT structure are RFC-correct. `default_tz` is the
+    timezone a naive start/end is interpreted in (the physician's zone for
+    model-supplied times) before conversion to UTC for storage.
     """
     from icalendar import Calendar, Event, vText
 
@@ -223,8 +236,8 @@ def _build_block_calendar(uid: str, start_iso: str, end_iso: str, title: str) ->
     vevent = Event()
     vevent.add("uid", uid)
     vevent.add("summary", title)
-    vevent.add("dtstart", _to_utc(start_iso))
-    vevent.add("dtend", _to_utc(end_iso))
+    vevent.add("dtstart", _to_utc(start_iso, default_tz))
+    vevent.add("dtend", _to_utc(end_iso, default_tz))
     # HANDS-03 data-safety tag — confirmed to survive the SOGo round-trip
     # (23-PROBE-FINDINGS §3, A7 PASS). This is what clear_range filters on.
     vevent.add(X_CUE_MANAGED, vText("true"))
@@ -293,18 +306,21 @@ async def block_time(
     title: str,
     *,
     physician_id: Optional[str] = None,
+    tz_name: str = _DEFAULT_CAL_TIMEZONE,
 ) -> str:
     """Create a busy VEVENT tagged X-CUE-MANAGED and return its UID (HANDS-03).
 
-    Stored in UTC. The route (confirm-write) wraps the returned uid as
-    { "blocked": true, "uid": <uid> }. physician_id is accepted only for
+    Stored in UTC. `tz_name` is the physician's scheduling timezone: a naive
+    (offset-less) start/end from the model is interpreted in it before storage
+    (the model emits LOCAL time). The route (confirm-write) wraps the returned
+    uid as { "blocked": true, "uid": <uid> }. physician_id is accepted only for
     log/trace correlation — it is NEVER part of the CalDAV identity (that is the
     username/password credential).
     """
-    start_utc = _to_utc(start_iso)
-    end_utc = _to_utc(end_iso)
+    start_utc = _to_utc(start_iso, tz_name)
+    end_utc = _to_utc(end_iso, tz_name)
     uid = f"cue-{uuid.uuid4()}"
-    ical_str = _build_block_calendar(uid, start_iso, end_iso, title)
+    ical_str = _build_block_calendar(uid, start_iso, end_iso, title, tz_name)
 
     def _write(cal: Any) -> str:
         # Content idempotency: if an identical cue-managed block already exists at
@@ -337,6 +353,7 @@ async def clear_range(
     end_iso: str,
     *,
     physician_id: Optional[str] = None,
+    tz_name: str = _DEFAULT_CAL_TIMEZONE,
 ) -> dict:
     """Delete ONLY X-CUE-MANAGED events in [start,end] (HANDS-03 blast-radius).
 
@@ -344,10 +361,11 @@ async def clear_range(
     (untagged) event is NEVER passed to delete() under any code path — the
     delete() call is reachable only inside the `if _is_cue_managed(...)` branch.
     A range with zero Cue-managed events deletes nothing and returns
-    {"deleted": 0, "skipped": <N>}.
+    {"deleted": 0, "skipped": <N>}. `tz_name` interprets a naive (offset-less)
+    range in the physician's scheduling timezone (the model emits LOCAL time).
     """
-    start = _to_utc(start_iso)
-    end = _to_utc(end_iso)
+    start = _to_utc(start_iso, tz_name)
+    end = _to_utc(end_iso, tz_name)
 
     def _sweep(cal: Any) -> dict:
         deleted = 0

@@ -160,7 +160,9 @@ async def test_confirm_write_block_is_idempotent_on_replayed_token(monkeypatch):
     import services.cue.calendar_dav as caldav_mod
     calls = {"n": 0}
 
-    async def _fake_block(username, password, start_iso, end_iso, title, *, physician_id=None):
+    async def _fake_block(
+        username, password, start_iso, end_iso, title, *, physician_id=None, tz_name=None
+    ):
         calls["n"] += 1
         return f"cue-fixed-uid-{calls['n']}"
 
