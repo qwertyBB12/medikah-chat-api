@@ -509,6 +509,20 @@ async def cue_chat(
                         }.items() if v is not None
                     }).encode("utf-8") + b"\n"
                     yield frame
+                elif etype == "card":
+                    # PHASE 24 (clinical decision support): an ADDITIVE structured
+                    # card — surfaced to the UI mid-stream (Cue's narration continues
+                    # AFTER it). It is NON-TERMINAL, so it gets its own frame byte
+                    # \x1d (GS) — a sibling of the \x1f (US) tool frames, NOT the \x1e
+                    # (RS) confirm tail (which is terminal and stops text emission).
+                    # One byte = one semantic. NOT spoken text: it is NOT appended to
+                    # `captured` (the judge text) and does NOT count toward TTFT.
+                    card_frame = (
+                        b"\x1d"
+                        + json.dumps({"card": ev.get("card")}).encode("utf-8")
+                        + b"\n"
+                    )
+                    yield card_frame
                 elif etype == "done":
                     usage_totals = ev.get("usage", usage_totals)
                     pending_confirm = ev.get("pending_confirm")

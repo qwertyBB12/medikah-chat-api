@@ -50,6 +50,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from services.cue.clinical_support import generate_clinical_support
+
 logger = logging.getLogger(__name__)
 
 
@@ -468,3 +470,54 @@ async def inquiry_list_recent(
         "La cola de consultas de pacientes aún no está conectada a tu espacio de "
         "trabajo. / Your patient-inquiry queue isn't connected to your workspace yet."
     )
+
+
+# ---------------------------------------------------------------------------
+# clinical_decision_support executor (Phase 24 — Cue clinical support surface)
+#
+# NAMING / LEGAL (Hector, 2026-06-29): a doctor-support tool. NOTHING here is named
+# or framed as an "(official) diagnosis" — it returns ranked clinical CONSIDERATIONS
+# for the physician to weigh. The only "diagnosis" token is the disclaimer's denial.
+# ---------------------------------------------------------------------------
+
+
+async def clinical_decision_support(
+    physician_id: str,                 # session-derived (dispatcher kwarg) — never model-supplied
+    presentation: str,                 # functional arg: DE-IDENTIFIED clinical presentation
+    age_range: Optional[str] = None,   # functional arg
+    sex: Optional[str] = None,         # functional arg
+) -> str:
+    """Generate ranked clinical considerations from a DE-IDENTIFIED presentation (Phase 24).
+
+    Returns a {kind:'clinical_support', considerations, red_flags, disclaimer, summary}
+    JSON card payload. The engine surfaces the structured card to the UI AND feeds the
+    readable `summary` prose back to the model so Cue narrates a walkthrough and the
+    doctor can keep conversing about it — the loop CONTINUES (this is NOT a terminal
+    confirm card).
+
+    No verified-gate: this is a stateless LLM call (it never mints a Mailcow
+    credential like the hands executors), so any authenticated physician may use it
+    — matching the legacy clinical-support endpoint's auth posture.
+
+    Stateless / no-PHI: the presentation is never logged or stored. The per-action
+    audit row records the action + consideration count ONLY (never the presentation,
+    never IP+UA — in-loop executor, HANDS-08a scoping).
+    """
+    import json
+
+    result = await generate_clinical_support(presentation, age_range=age_range, sex=sex)
+
+    _write_action_audit(
+        physician_id,
+        "cue.clinical_decision_support",
+        {"consideration_count": len(result.get("considerations", []))},
+    )
+
+    payload = {
+        "kind": "clinical_support",
+        "considerations": result["considerations"],
+        "red_flags": result["red_flags"],
+        "disclaimer": result["disclaimer"],
+        "summary": result["summary"],
+    }
+    return json.dumps(payload)

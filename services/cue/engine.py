@@ -275,10 +275,25 @@ async def run_cue_turn_streaming(
                     physician_id=physician_id,  # session-derived; model cannot override
                     locale=locale,
                 )
+
+                # PHASE 24 (clinical decision support): a clinical_decision_support
+                # tool_result is a {kind:'clinical_support'} JSON card. It is ADDITIVE
+                # — we feed the readable `summary` prose back to the model (so Cue
+                # narrates a walkthrough and the doctor can keep conversing about it)
+                # and surface the STRUCTURED card to the UI below. UNLIKE the confirm
+                # card, the loop does NOT stop.
+                support_card = _try_parse_clinical_support_card(result_text)
+                tool_result_content = result_text
+                if support_card is not None:
+                    tool_result_content = (
+                        support_card.get("summary")
+                        or "(Clinical considerations were generated and shown to the physician as a card.)"
+                    )
+
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": result_text,
+                    "content": tool_result_content,
                 })
                 logger.debug(
                     "[cue:engine] tool %r OK physician=%s chars=%d",
@@ -297,6 +312,22 @@ async def run_cue_turn_streaming(
                 if n_items:
                     end_frame["items"] = n_items
                 yield end_frame
+
+                # PHASE 24: surface the clinical-support card to the UI (ADDITIVE —
+                # the loop CONTINUES so Cue narrates a walkthrough; this is NOT a
+                # terminal stop like the confirm card). The `summary` prose is
+                # intentionally omitted from the card payload (the card is the
+                # structured surface; the prose was fed to the model above).
+                if support_card is not None:
+                    yield {
+                        "type": "card",
+                        "card": {
+                            "kind": "clinical_support",
+                            "considerations": support_card.get("considerations", []),
+                            "red_flags": support_card.get("red_flags", []),
+                            "disclaimer": support_card.get("disclaimer", ""),
+                        },
+                    }
 
                 # D-03 SURFACING (Plan 23-04): a block/clear PROPOSER returns a
                 # json.dumps({kind:'confirm', ...}) tool_result. Detect it, capture
@@ -446,6 +477,29 @@ def _try_parse_confirm(result_text: Any) -> Optional[dict]:
     except (ValueError, TypeError):
         return None
     if isinstance(parsed, dict) and parsed.get("kind") == "confirm":
+        return parsed
+    return None
+
+
+def _try_parse_clinical_support_card(result_text: Any) -> Optional[dict]:
+    """Return the parsed dict if result_text is a {kind:'clinical_support'} JSON card.
+
+    Phase 24: the clinical_decision_support executor returns a JSON-encoded card
+    {kind:'clinical_support', considerations, red_flags, disclaimer, summary}. This
+    is an ADDITIVE card (the loop continues, unlike the {kind:'confirm'} proposer).
+    Anything else (prose, malformed JSON, a confirm card, a JSON object without
+    kind=='clinical_support') returns None so the loop proceeds normally.
+    """
+    if not isinstance(result_text, str):
+        return None
+    stripped = result_text.lstrip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, dict) and parsed.get("kind") == "clinical_support":
         return parsed
     return None
 

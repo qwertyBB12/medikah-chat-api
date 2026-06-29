@@ -179,6 +179,51 @@ NEUTRAL_TOOLS: list[CueNeutralTool] = [
             "required": [],
         },
     ),
+    # ----- Phase 24 — Cue clinical DECISION-SUPPORT surface -----
+    # NAMING / LEGAL (Hector, 2026-06-29): a doctor-support tool. It is NEVER named or
+    # framed as an "(official) diagnosis" — it returns ranked clinical CONSIDERATIONS
+    # for the physician to weigh. A NORMAL tool (NOT a confirm proposer): its result is
+    # additively surfaced to the UI as a structured card AND the loop continues so Cue
+    # narrates a walkthrough and the doctor can keep conversing. NO physician_id arg.
+    CueNeutralTool(
+        name="clinical_decision_support",
+        description=(
+            "Generates ranked clinical CONSIDERATIONS (possible conditions to weigh) from a "
+            "DE-IDENTIFIED clinical presentation the physician provides. Use ONLY when a "
+            "physician explicitly asks for clinical decision support, considerations, or 'what "
+            "could this be' for a case. "
+            "The presentation must contain NO patient-identifying information (no names, contact "
+            "details, dates, or identifiers) — only symptoms, history, and findings. "
+            "After the tool returns, give a brief conversational walkthrough of the considerations "
+            "(highlight the leading ones and any red flags) and invite follow-up questions — the "
+            "full ranked list is already shown to the physician as a card, so summarize rather than "
+            "re-reading every item. This is clinical DECISION SUPPORT only: present it as "
+            "considerations to support the physician's judgment — never state or imply it is the "
+            "patient's diagnosis. "
+            "Never accepts a physician_id argument — scope is always the authenticated session."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "presentation": {
+                    "type": "string",
+                    "description": (
+                        "The DE-IDENTIFIED clinical presentation: symptoms, history, and "
+                        "exam/lab findings. Must contain NO patient identifiers."
+                    ),
+                },
+                "age_range": {
+                    "type": "string",
+                    "description": "Optional age range if clinically relevant (e.g. '30-40', 'pediatric', 'elderly').",
+                },
+                "sex": {
+                    "type": "string",
+                    "description": "Optional biological sex if clinically relevant.",
+                },
+            },
+            "required": ["presentation"],
+        },
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -260,6 +305,21 @@ async def dispatch_tool(
         # payload (JSON string); never writes. 'confirmed' is stripped above.
         from services.cue.tools.executors import calendar_clear_range
         return await calendar_clear_range(physician_id=physician_id, locale=locale, **safe_input)
+
+    if tool_name == "clinical_decision_support":
+        # Phase 24 — Cue clinical decision-support surface. presentation is the only
+        # functional input (DE-IDENTIFIED); age_range/sex are optional. NO physician_id
+        # from tool_input (stripped above + not in schema); scope is the session id.
+        from services.cue.tools.executors import clinical_decision_support
+        presentation = str(safe_input.get("presentation", "")).strip()
+        age_range = safe_input.get("age_range")
+        sex = safe_input.get("sex")
+        return await clinical_decision_support(
+            physician_id=physician_id,
+            presentation=presentation,
+            age_range=age_range,
+            sex=sex,
+        )
 
     # Unknown tool — raise so the engine returns an is_error tool_result
     raise ValueError(f"Unknown tool: {tool_name!r}")
