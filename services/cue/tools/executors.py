@@ -159,6 +159,38 @@ def _write_action_audit(physician_id: str, action: str, detail: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Physician scheduling timezone (HANDS-03 — diagnosis 2026-06-28)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PHYSICIAN_TZ = "America/Mexico_City"
+
+
+def resolve_physician_tz(physician_id: str) -> str:
+    """The physician's IANA scheduling timezone, with a Mexico City fallback.
+
+    Source of truth = physician_availability.timezone (their practice zone).
+    That column defaults to 'UTC' on rows that never set it, so 'UTC' is treated
+    as UNSET (→ fallback) — no LatAm doctor schedules in UTC, and storing local
+    blocks as if UTC was the booking-time bug. Threads a real per-doctor zone
+    into the date directive + calendar read/write so 'today/tomorrow' and block
+    times resolve in the doctor's zone (hemispheric scope), not a hardcoded
+    constant. Never raises (fail-safe to the Mexico City default).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        from services.physician_dashboard import get_physician_availability
+
+        av = get_physician_availability(physician_id)
+        tz = (getattr(av, "timezone", None) or "").strip()
+        if tz and tz.upper() != "UTC":
+            ZoneInfo(tz)  # validate; unknown zone raises → fallback
+            return tz
+    except Exception:
+        logger.debug("[cue:tools] tz resolve fell back for physician=%s", physician_id)
+    return _DEFAULT_PHYSICIAN_TZ
+
+
+# ---------------------------------------------------------------------------
 # calendar_read_day executor (Phase 23 HANDS-03/04 — REAL)
 # ---------------------------------------------------------------------------
 
@@ -187,7 +219,9 @@ async def calendar_read_day(
     from services.cue import calendar_dav
 
     cred = await get_cue_cred(physician_id, mailbox_local_part)
-    events = await calendar_dav.read_day(cred.username, cred.password, date)
+    events = await calendar_dav.read_day(
+        cred.username, cred.password, date, tz_name=resolve_physician_tz(physician_id)
+    )
 
     # Per-action audit — range/action only, NO IP+UA (no Request here; HANDS-08a).
     _write_action_audit(

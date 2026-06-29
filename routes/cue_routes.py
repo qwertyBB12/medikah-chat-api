@@ -801,7 +801,7 @@ async def cue_confirm_write(
 
     # Resolve the Cue credential (lazy-mint, kill-switch-gated inside the broker).
     from services.cue.credential_broker import get_cue_cred
-    from services.cue.tools.executors import _load_workspace_context
+    from services.cue.tools.executors import _load_workspace_context, resolve_physician_tz
     from services.cue import calendar_dav
 
     mailbox_local_part, verification_status = _load_workspace_context(physician_id)
@@ -809,6 +809,9 @@ async def cue_confirm_write(
         raise HTTPException(status_code=403, detail="Workspace not connected")
 
     cred = await get_cue_cred(physician_id, mailbox_local_part)
+    # Interpret the model's naive (offset-less) LOCAL block/clear times in the
+    # doctor's own scheduling zone before storage (diagnosis 2026-06-28).
+    physician_tz = resolve_physician_tz(physician_id)
 
     ip, ua = _request_ip_ua(request)
 
@@ -821,6 +824,7 @@ async def cue_confirm_write(
             body.end_iso,
             title,
             physician_id=physician_id,
+            tz_name=physician_tz,
         )
         result: dict = {"blocked": True, "uid": uid}
         _write_confirm_audit(
@@ -838,6 +842,7 @@ async def cue_confirm_write(
             body.start_iso,
             body.end_iso,
             physician_id=physician_id,
+            tz_name=physician_tz,
         )
         result = {"deleted": cleared["deleted"], "skipped": cleared["skipped"]}
         _write_confirm_audit(
@@ -1221,6 +1226,12 @@ async def _build_system_prompt(
         "Always place the clinical decision with the physician."
     )
 
+    # Per-doctor scheduling timezone for the date directive: "today/tomorrow" and
+    # the current-time reference resolve in the physician's own zone, not a
+    # hardcoded constant (diagnosis 2026-06-28). Fail-safe to Mexico City.
+    from services.cue.tools.executors import resolve_physician_tz
+    physician_tz = resolve_physician_tz(physician_id)
+
     try:
         # assemble() is a SYNCHRONOUS pure prompt-builder (locale + surface only).
         # It does NOT accept physician_id/supabase and is NOT awaitable — the old
@@ -1242,7 +1253,7 @@ async def _build_system_prompt(
             if notes:
                 recall = assemble_recall_envelope(notes, locale)
                 prompt = recall + "\n\n" + prompt
-        return prompt + _build_date_directive(locale)
+        return prompt + _build_date_directive(locale, physician_tz)
     except Exception as exc:
         logger.error(
             "[cue] assemble() failed for physician=%s locale=%s — using fallback prompt: %s",
@@ -1251,4 +1262,4 @@ async def _build_system_prompt(
             exc,
         )
         fallback = _FALLBACK_PROMPT_ES if locale == "es" else _FALLBACK_PROMPT_EN
-        return fallback + _build_date_directive(locale)
+        return fallback + _build_date_directive(locale, physician_tz)
