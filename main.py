@@ -119,6 +119,29 @@ logger = logging.getLogger("medikah.api")
 
 openai_client = get_openai_client()
 
+# Populated by the startup schema-check below; surfaced on /health so a missing
+# table/column (an unapplied backend migration) is visible instead of silently
+# 500'ing a feature later. Defaults to "not yet checked".
+_schema_status: dict = {"ok": True, "checked": False, "problems": []}
+
+
+@app.on_event("startup")
+async def _verify_required_schema():
+    """On startup: assert required DB tables/columns exist; log loudly if not.
+
+    Backend migrations (medikah-chat-api/db/migrations/) are applied by hand with
+    no deploy step, so a forgotten migration leaves prod missing a table and the
+    feature 500s only when a user hits it. This turns that into a CRITICAL log at
+    boot and an entry on /health. Non-fatal — the rest of the API keeps serving.
+    """
+    global _schema_status
+    from db.schema_check import check_schema, log_schema_status
+    try:
+        _schema_status = check_schema()
+        log_schema_status(_schema_status)
+    except Exception:
+        logger.exception("[schema-check] failed to run; continuing")
+
 
 class ChatRequest(BaseModel):
     """Schema for a chat request."""
@@ -823,5 +846,6 @@ async def health() -> dict:
         "ai_test": "configured" if openai_client else "not_configured",
         "doxy_room_url": DOXY_ROOM_URL or "(not set)",
         "doxy_base_url": DOXY_BASE_URL or "(not set)",
+        "schema": _schema_status,
     }
 
