@@ -159,6 +159,7 @@ class CueChatRequest(BaseModel):
     messages: list[dict]       # [{"role": "user"|"assistant", "content": str}]
     locale: str = "es"         # "en" | "es" — physicians are Spanish-first
     context: str = "workspace" # surface hint for system-prompt builder
+    mode: str = "text"         # "text" | "voice" — gates the brevity/no-markdown voice addendum
     max_tokens: int = 1024     # AI-SPEC §4b.3: max_tokens MANDATORY, explicit limit
     opening: bool = False      # Phase 23: brain-generated open-greeting turn
 
@@ -346,6 +347,7 @@ async def cue_chat(
         locale=cue_locale,
         supabase=supabase,
         query_text=recall_query,
+        mode=body.mode,
     )
 
     # ------------------------------------------------------------------
@@ -1191,6 +1193,7 @@ async def _build_system_prompt(
     locale: str,
     supabase,
     query_text: str | None = None,
+    mode: str = "text",
 ) -> str:
     """
     Assemble the clinical system prompt for the physician.
@@ -1225,7 +1228,7 @@ async def _build_system_prompt(
         # EVERY turn, silently dropping to the generic English fallback below
         # (which is why Cue was English-only and said "How can I help?" — a phrase
         # the real clinical core explicitly forbids).
-        prompt = assemble(locale=locale, surface="workspace")
+        prompt = assemble(locale=locale, surface="workspace", mode=mode)
         # Phase 25 MEM-01: prepend the cross-session recall envelope (fail-open).
         # Recall is gated on the SAME aviso as writes — no consent means no notes
         # exist anyway, so we skip the embedding API call entirely (avoids paying
