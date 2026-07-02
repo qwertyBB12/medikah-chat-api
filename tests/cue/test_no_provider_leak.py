@@ -253,12 +253,12 @@ def test_adapter_is_abstract_contract() -> None:
 def test_select_model_tier_routing() -> None:
     """D1-G: Tier routing returns the correct dated model IDs from AI-SPEC §4."""
     assert select_model("haiku") == "claude-haiku-4-5-20251001"
-    assert select_model("sonnet") == "claude-sonnet-4-6"
+    assert select_model("sonnet") == "claude-sonnet-5"
     assert select_model("opus") == "claude-opus-4-8"
     # Default tier should be sonnet
-    assert select_model() == "claude-sonnet-4-6"
+    assert select_model() == "claude-sonnet-5"
     # Unknown tier falls back to default (sonnet)
-    assert select_model("unknown-tier") == "claude-sonnet-4-6"
+    assert select_model("unknown-tier") == "claude-sonnet-5"
 
 
 # ---------------------------------------------------------------------------

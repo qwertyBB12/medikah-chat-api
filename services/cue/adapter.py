@@ -468,11 +468,14 @@ def create_adapter(provider: Provider = "anthropic") -> CueModelAdapter:
 # Tier → model ID routing (from AI-SPEC §4)
 # ---------------------------------------------------------------------------
 
-# Model IDs verified against Anthropic Models Overview 2026-06-21.
+# Model IDs verified against Anthropic Models Overview 2026-07-02.
 # Do NOT change without re-verifying against the live docs.
+# Sonnet 5 (released 2026-06-30): near-Opus-4.8 agentic/tool-use performance,
+# 128K max output, Jan-2026 knowledge cutoff; $2/$10 MTok intro through
+# 2026-08-31, then $3/$15 (same as the Sonnet 4.6 it replaces).
 _TIER_MODELS: dict[str, str] = {
     "haiku": "claude-haiku-4-5-20251001",   # background memory/flag judges; free/trial tier
-    "sonnet": "claude-sonnet-4-6",           # default reasoning brain (all active physicians)
+    "sonnet": "claude-sonnet-5",             # default reasoning brain (all active physicians)
     "opus": "claude-opus-4-8",               # highest-stakes clinical (Phase 24 diagnosis surface)
 }
 _DEFAULT_TIER = "sonnet"
