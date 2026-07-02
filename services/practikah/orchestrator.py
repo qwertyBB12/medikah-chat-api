@@ -452,7 +452,7 @@ async def _provision_free_workspace(
     only adds the physician's mailbox to that existing domain.
 
     Saga step:
-      1. mailcow.add_mailbox(domain='medikah.health', local_part, password, quota_mb=10240)
+      1. mailcow.add_mailbox(domain='medikah.health', local_part, password, quota_mb=5120)
 
     UNDO: undo_add_mailbox on failure (UNDO_REGISTRY already covers this step).
 
@@ -516,7 +516,7 @@ async def _provision_free_workspace(
             domain=domain,
             password=mailbox_password,
             run_id=run_id,
-            quota_mb=10240,  # MAIL-08: 10 GB default
+            quota_mb=5120,  # 5 GB free tier (dropped from 10 GB 2026-07-02)
         )
     except Exception as err:
         elapsed = time.monotonic() - started_at

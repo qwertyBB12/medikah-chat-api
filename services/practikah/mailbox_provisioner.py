@@ -36,7 +36,9 @@ from tenacity import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_DKIM_SELECTOR = "mcdkim"
-DEFAULT_QUOTA_MB = 10240  # MAIL-08: 10 GB
+DEFAULT_QUOTA_MB = 5120  # 5 GB free tier (dropped from 10 GB 2026-07-02 — 10 GB/doctor
+# repeatedly exhausted the Mailcow domain quota during onboarding; 5 GB fits far more
+# doctors per GB of VPS disk. Keep in sync with the frontend provisioner + workspace copy.
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +272,7 @@ class MailboxProvisioner:
         Args:
             domain: The domain name to create (e.g., 'drlopez.com').
             run_id: Saga run identifier for correlation and audit.
-            quota_mb: Total mailbox quota for the domain in MB. Default 10 GB per MAIL-08.
+            quota_mb: Total mailbox quota for the domain in MB. Default 5 GB.
 
         Returns:
             MailcowResult with success=True and resource_id=effective_domain on success.
@@ -441,7 +443,7 @@ class MailboxProvisioner:
             domain: The domain name (sandbox prefix applied automatically if sandbox_mode=True).
             password: The mailbox password. NEVER logged. Caller generates and discards.
             run_id: Saga run identifier for correlation and audit.
-            quota_mb: Mailbox storage quota in MB. Default 10 GB per MAIL-08.
+            quota_mb: Mailbox storage quota in MB. Default 5 GB.
 
         Returns:
             MailcowResult with resource_id='<local_part>@<effective_domain>' on success.

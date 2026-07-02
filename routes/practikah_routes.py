@@ -598,7 +598,7 @@ async def wizard_complete(
                     "title": body.title,
                     "mailbox_local_part": body.mailbox_local_part,
                     "mailbox_address": mailbox_address,
-                    "mailbox_quota_mb": 10240,
+                    "mailbox_quota_mb": 5120,
                     "workspace_setup_completed_at": "now()",
                 }
             ).eq("physician_id", auth.physician_id).execute()
