@@ -305,6 +305,18 @@ class ProvisioningLogWriter:
 
         Per D-09: crash-resume scans for these on FastAPI startup. resume_orphan_runs
         invokes run_rollback for each — see orchestrator.py.
+
+        ⚠️ HAZARD (verified against prod 2026-07-03): the RPC
+        ``list_orphan_provisioning_runs`` does NOT exist in the production DB
+        (pg_proc is empty), so this method has always returned [] in prod and
+        the sweeper is a no-op. DO NOT create the RPC with the criteria above
+        as written: the log has NO success-terminal event kind, so every
+        COMPLETED run ever (all steps requested+succeeded, no rollback rows,
+        >5 min old) matches "orphan" — creating it verbatim would roll back
+        every provisioned workspace on the next deploy. A correct definition
+        must key off ``provisioning_runs.status`` (e.g. status='running' AND
+        updated_at stale) and MUST exclude ``saga_type='pro_upgrade'`` (see
+        orchestrator._pro_upgrade_run_ids, the defense-in-depth guard).
         """
         db = get_supabase()
         if db is None:

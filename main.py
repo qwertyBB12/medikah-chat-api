@@ -111,6 +111,18 @@ async def _resume_orphan_provisioning_runs():
     except Exception:
         logger.exception("[practikah] resume_orphan_runs failed; continuing")
 
+    # Step-replay slice: the pro finish-later loop is an in-process asyncio
+    # task that dies on every deploy — re-arm it for any pro run stranded in
+    # partial_finish_later with retry budget left. (Pro runs are EXCLUDED
+    # from the rollback sweeper above — resume, never rollback.)
+    from services.practikah.pro_saga import rearm_finish_later_runs
+    try:
+        armed = await rearm_finish_later_runs()
+        if armed:
+            logger.info("[practikah] re-armed %d pro finish-later loop(s) on startup", armed)
+    except Exception:
+        logger.exception("[practikah] rearm_finish_later_runs failed; continuing")
+
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
 logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")

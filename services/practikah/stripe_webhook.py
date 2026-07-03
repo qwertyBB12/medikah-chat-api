@@ -388,27 +388,28 @@ async def _on_invoice_payment_succeeded(event: dict[str, Any], db: Any) -> dict[
         )
 
     # ------------------------------------------------------------------
-    # Hung-saga reconciliation VISIBILITY (Pro audit P0, 2026-07-02).
-    # A payment that recovers after dunning flips the subscription active,
-    # but a provisioning run stranded in partial_finish_later (or failed)
-    # stays stranded — the doctor is paying for a site that never went
-    # live, and NOTHING surfaced it. We deliberately do NOT auto-resume:
-    # the saga's steps share inline state and are not yet independently
-    # replayable, so an automated re-run could hit the registrar
-    # non-idempotently and trigger the pre-POR undo+refund on a doctor who
-    # already owns the domain. Until the step-replay primitive lands
-    # (Plan 14 companion), recovery = make the stranding LOUD: audit row +
-    # ops alert + structured log, surfaced in this handler's return.
+    # Hung-saga reconciliation (Pro audit P0 2026-07-02, upgraded by the
+    # step-replay slice 2026-07-03). A payment that recovers after dunning
+    # flips the subscription active, but a provisioning run stranded in
+    # partial_finish_later (or failed) stays stranded — the doctor is
+    # paying for a site that never went live. Stranding is always made
+    # LOUD (audit row + ops alert + handler return). Since the saga is now
+    # step-replayable (pro_saga.resume_pro_run: hydrates from the log,
+    # refuses pre-POR runs, idempotent runners), recovery can additionally
+    # AUTO-RESUME each stuck run — gated behind PRO_AUTO_RESUME_ON_RECOVERY,
+    # default OFF until a manual resume proves out end-to-end.
     # ------------------------------------------------------------------
     stuck_runs = _find_stuck_pro_runs(db, physician_id)
     for run in stuck_runs:
         _alert_stuck_run_on_recovery(db, physician_id, run)
+    auto_resume_spawned = _spawn_auto_resume(db, physician_id, stuck_runs)
 
     return {
         "dispatched": "invoice.payment_succeeded",
         "physician_id": physician_id,
         "current_period_end": period_end_iso,
         "stuck_pro_runs": [r.get("run_id") for r in stuck_runs],
+        "auto_resume_spawned": auto_resume_spawned,
     }
 
 
@@ -429,6 +430,52 @@ def _find_stuck_pro_runs(db: Any, physician_id: str) -> list[dict[str, Any]]:
             "[stripe_webhook] stuck-run lookup failed physician_id=%s", physician_id,
         )
         return []
+
+
+def _auto_resume_enabled() -> bool:
+    """PRO_AUTO_RESUME_ON_RECOVERY gate — default OFF.
+
+    Hector arms this after one manual resume (POST
+    /practikah/internal/pro-resume-run) proves out end-to-end.
+    """
+    return os.environ.get("PRO_AUTO_RESUME_ON_RECOVERY", "false").lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _spawn_auto_resume(
+    db: Any, physician_id: str, stuck_runs: list[dict[str, Any]]
+) -> list[str]:
+    """Fire-and-forget resume_pro_run for each stuck run, if the env gate is on.
+
+    Returns the run_ids spawned ([] when the gate is off). The resume's own
+    guards (post-POR proof, status check) run inside the task, so a run that
+    turns out to be non-resumable is refused loudly rather than mutated.
+    """
+    if not stuck_runs or not _auto_resume_enabled():
+        return []
+    import asyncio
+
+    from services.practikah.pro_saga import resume_pro_run
+
+    spawned: list[str] = []
+    for run in stuck_runs:
+        run_id = run.get("run_id")
+        if not run_id:
+            continue
+        asyncio.create_task(
+            resume_pro_run(
+                db, str(run_id), trigger="payment_recovery",
+                spawn_finish_later=True,
+            )
+        )
+        spawned.append(str(run_id))
+    if spawned:
+        logger.info(
+            "[stripe_webhook] auto-resume spawned for %d stranded pro run(s): %s",
+            len(spawned), spawned,
+        )
+    return spawned
 
 
 def _alert_stuck_run_on_recovery(db: Any, physician_id: str, run: dict[str, Any]) -> None:

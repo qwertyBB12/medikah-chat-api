@@ -29,6 +29,7 @@ from uuid import uuid4
 
 import httpx
 
+from db.client import get_supabase
 from services.practikah.audit import ProvisioningLogWriter
 from services.practikah.cloudflare_client import CloudflareClient, CloudflareResult
 from services.practikah.dns_writer import compose_dns_records
@@ -1172,6 +1173,35 @@ async def run_rollback(physician_id: str, run_id: str) -> None:
 # Crash-resume: detect and clean up orphaned runs
 # ---------------------------------------------------------------------------
 
+def _pro_upgrade_run_ids(run_ids: list[str]) -> set[str]:
+    """Return the subset of ``run_ids`` that belong to pro_upgrade sagas.
+
+    Step-replay slice P0 guard: pro runs must NEVER reach the rollback
+    sweeper. Fail CLOSED — if the lookup errors, treat every run as pro so
+    a DB hiccup can't let the sweeper tear down a doctor-owned domain.
+    """
+    if not run_ids:
+        return set()
+    db = get_supabase()
+    if db is None:
+        return set(run_ids)
+    try:
+        res = (
+            db.table("provisioning_runs")
+            .select("run_id")
+            .in_("run_id", run_ids)
+            .eq("saga_type", "pro_upgrade")
+            .execute()
+        )
+        return {str(r.get("run_id")) for r in (res.data or []) if r.get("run_id")}
+    except Exception:
+        logger.exception(
+            "[orchestrator] _pro_upgrade_run_ids lookup failed — "
+            "failing closed (treating all as pro)"
+        )
+        return set(run_ids)
+
+
 async def resume_orphan_runs() -> int:
     """Detect orphaned provisioning runs and run rollback for each.
 
@@ -1183,12 +1213,31 @@ async def resume_orphan_runs() -> int:
     Per D-09: the log is the source of truth. If the FastAPI process died mid-provision,
     the log preserves what completed; this function resumes rollback.
 
+    Step-replay slice P0 guard (2026-07-03): pro_upgrade runs are EXCLUDED.
+    A post-POR pro run in partial_finish_later matches the orphan criteria
+    (has 'requested' rows, no rollback terminal, stale while waiting on
+    DNS/cert propagation) — sweeping it would tear down a domain the doctor
+    already OWNS. Pro recovery is pro_saga.rearm_finish_later_runs +
+    resume_pro_run, never rollback-by-sweeper.
+
     Returns the number of orphaned runs cleaned up (may be 0).
     """
     orphans = await ProvisioningLogWriter.list_orphan_runs()
 
     if not orphans:
         logger.debug("[orchestrator] resume_orphan_runs: no orphaned runs found")
+        return 0
+
+    pro_ids = _pro_upgrade_run_ids([run_id for _, run_id in orphans])
+    if pro_ids:
+        logger.warning(
+            "[orchestrator] resume_orphan_runs: excluding %d pro_upgrade run(s) "
+            "from rollback sweep: %s — pro recovery is resume, never rollback",
+            len(pro_ids), sorted(pro_ids),
+        )
+        orphans = [(pid, rid) for pid, rid in orphans if rid not in pro_ids]
+
+    if not orphans:
         return 0
 
     logger.warning(

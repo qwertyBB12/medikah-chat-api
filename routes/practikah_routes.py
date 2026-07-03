@@ -2106,3 +2106,53 @@ async def internal_pro_redirect_map(request: Request) -> dict[str, str]:
         return {}
 
     return await active_pro_redirect_map(db)
+
+
+# ---------------------------------------------------------------------------
+# Step-replay slice — manual ops resume for stranded pro runs
+# ---------------------------------------------------------------------------
+
+class ProResumeRunRequest(BaseModel):
+    run_id: str = Field(..., min_length=8, max_length=64)
+
+
+@router.post("/internal/pro-resume-run")
+async def internal_pro_resume_run(
+    request: Request, body: ProResumeRunRequest
+) -> dict[str, Any]:
+    """Internal ops endpoint — resume a stranded post-POR pro run.
+
+    Auth: ``X-Internal-Secret`` header must equal ``INTERNAL_API_SHARED_SECRET``
+    (same idiom as /internal/pro-redirect-map). Guards run synchronously and a
+    refusal returns 409 with the reason; the saga itself executes in the
+    background (LE cert polling can take minutes). Ops usage:
+
+        curl -X POST .../practikah/internal/pro-resume-run \\
+             -H "X-Internal-Secret: $SECRET" -H "Content-Type: application/json" \\
+             -d '{"run_id": "<uuid>"}'
+    """
+    from services.practikah.pro_saga import resume_pro_run
+
+    expected = os.environ.get("INTERNAL_API_SHARED_SECRET", "")
+    if not expected:
+        logger.error("internal_pro_resume_run: INTERNAL_API_SHARED_SECRET not set")
+        raise HTTPException(status_code=503, detail="internal auth not configured")
+
+    secret = request.headers.get("X-Internal-Secret", "")
+    if secret != expected:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    db = get_supabase()
+    if db is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    result = await resume_pro_run(
+        db, body.run_id, trigger="manual_ops",
+        spawn_finish_later=True, background=True,
+    )
+    if not result.get("resumed"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"resume refused: {result.get('reason', 'unknown')}",
+        )
+    return {"accepted": True, "run_id": body.run_id, **result}
