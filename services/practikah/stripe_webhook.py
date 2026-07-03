@@ -387,11 +387,99 @@ async def _on_invoice_payment_succeeded(event: dict[str, Any], db: Any) -> dict[
             "subscription_id=%s", subscription_id,
         )
 
+    # ------------------------------------------------------------------
+    # Hung-saga reconciliation VISIBILITY (Pro audit P0, 2026-07-02).
+    # A payment that recovers after dunning flips the subscription active,
+    # but a provisioning run stranded in partial_finish_later (or failed)
+    # stays stranded — the doctor is paying for a site that never went
+    # live, and NOTHING surfaced it. We deliberately do NOT auto-resume:
+    # the saga's steps share inline state and are not yet independently
+    # replayable, so an automated re-run could hit the registrar
+    # non-idempotently and trigger the pre-POR undo+refund on a doctor who
+    # already owns the domain. Until the step-replay primitive lands
+    # (Plan 14 companion), recovery = make the stranding LOUD: audit row +
+    # ops alert + structured log, surfaced in this handler's return.
+    # ------------------------------------------------------------------
+    stuck_runs = _find_stuck_pro_runs(db, physician_id)
+    for run in stuck_runs:
+        _alert_stuck_run_on_recovery(db, physician_id, run)
+
     return {
         "dispatched": "invoice.payment_succeeded",
         "physician_id": physician_id,
         "current_period_end": period_end_iso,
+        "stuck_pro_runs": [r.get("run_id") for r in stuck_runs],
     }
+
+
+def _find_stuck_pro_runs(db: Any, physician_id: str) -> list[dict[str, Any]]:
+    """Pro-upgrade runs for this physician stranded in a non-live state."""
+    try:
+        res = (
+            db.table("provisioning_runs")
+            .select("run_id, status, current_step, domain_name, error")
+            .eq("physician_id", physician_id)
+            .eq("saga_type", "pro_upgrade")
+            .in_("status", ["partial_finish_later", "failed"])
+            .execute()
+        )
+        return list(res.data or [])
+    except Exception:
+        logger.exception(
+            "[stripe_webhook] stuck-run lookup failed physician_id=%s", physician_id,
+        )
+        return []
+
+
+def _alert_stuck_run_on_recovery(db: Any, physician_id: str, run: dict[str, Any]) -> None:
+    """Audit + ops-alert a stranded run surfaced by a recovered payment."""
+    run_id = run.get("run_id")
+    logger.error(
+        "[stripe_webhook] payment recovered but pro run is STRANDED "
+        "physician_id=%s run_id=%s status=%s step=%s domain=%s — needs manual finish "
+        "(runbooks/PICKUP-pro-saga-finish-later.md)",
+        physician_id, run_id, run.get("status"), run.get("current_step"),
+        run.get("domain_name"),
+    )
+    try:
+        from services.practikah.pro_saga import _log_workspace_audit
+
+        _log_workspace_audit(
+            db,
+            physician_id,
+            action="pro.stranded_run_on_payment_recovery",
+            resource=str(run.get("domain_name") or ""),
+            run_id=str(run_id or ""),
+            detail={"status": run.get("status"), "current_step": run.get("current_step")},
+        )
+    except Exception:
+        logger.exception(
+            "[stripe_webhook] stranded-run audit write failed run_id=%s", run_id,
+        )
+    try:
+        log_dir = "/var/log/medikah"
+        if os.path.isdir(log_dir):
+            import json
+
+            with open(f"{log_dir}/ops-alerts.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "level": "alert",
+                            "source": "stripe_webhook.payment_recovered_stranded_run",
+                            "physician_id": physician_id,
+                            "run_id": run_id,
+                            "domain": run.get("domain_name"),
+                            "status": run.get("status"),
+                            "runbook": "runbooks/PICKUP-pro-saga-finish-later.md",
+                        }
+                    )
+                    + "\n"
+                )
+    except Exception:
+        logger.exception(
+            "[stripe_webhook] stranded-run ops-alert write failed run_id=%s", run_id,
+        )
 
 
 async def _on_invoice_payment_failed(event: dict[str, Any], db: Any) -> dict[str, Any]:
