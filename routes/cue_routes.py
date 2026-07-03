@@ -134,6 +134,25 @@ router = APIRouter(prefix="/cue", tags=["cue"])
 _MAX_MESSAGES = 10  # AI-SPEC §4 context-window strategy: hard cap at 10 turns
 
 
+def _window_messages(messages: list[dict]) -> list[dict]:
+    """Tail-window the history to _MAX_MESSAGES, always opening on a 'user' turn.
+
+    The Anthropic Messages API requires the FIRST message to be role 'user'.
+    A naive `[-_MAX_MESSAGES:]` slice of an alternating history lands on an
+    ASSISTANT message as soon as the conversation outgrows the cap, and every
+    turn after that 400s upstream — the recurring red "something went wrong"
+    Hector hit in long conversations (voice QA 2026-07-02). Dropping leading
+    non-user messages keeps the window valid; worst case we fall back to the
+    current user turn alone.
+    """
+    windowed = messages[-_MAX_MESSAGES:]
+    while windowed and windowed[0].get("role") != "user":
+        windowed = windowed[1:]
+    if not windowed and messages:
+        windowed = messages[-1:]
+    return windowed
+
+
 def _select_turn_model(*, opening: bool) -> str:
     """Pick the model tier for a turn (diagnosis 2026-06-28).
 
@@ -424,8 +443,9 @@ async def cue_chat(
             )
         messages = [{"role": "user", "content": directive}]
     else:
-        # Truncate history to last 10 turns (AI-SPEC §4 context strategy).
-        messages = body.messages[-_MAX_MESSAGES:]
+        # Truncate history to last 10 turns (AI-SPEC §4 context strategy),
+        # keeping the window valid for the upstream API (see _window_messages).
+        messages = _window_messages(body.messages)
 
     async def _token_gen() -> AsyncIterator[bytes]:
         """

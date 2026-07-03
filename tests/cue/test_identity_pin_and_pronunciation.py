@@ -12,7 +12,11 @@ Cue QA fixes from Hector's live voice session (2026-07-02 → 03 UTC):
 4. Memory hygiene — the judge refuses demo/hypothetical cases; the recall
    envelope tells the model notes are hints, droppable on non-recognition.
 """
-from routes.cue_routes import _build_identity_directive, _resolve_doctor_address
+from routes.cue_routes import (
+    _build_identity_directive,
+    _resolve_doctor_address,
+    _window_messages,
+)
 from services.cue.memory.judge import build_judge_prompt
 from services.cue.memory.recall import assemble_recall_envelope
 from services.cue.voice.providers import normalize_for_tts
@@ -108,6 +112,37 @@ def test_judge_prompt_refuses_demo_and_hypothetical_cases():
     assert "hypothetical" in p
     assert "role-played" in p
     assert "kept=false" in p
+
+
+def _mk_history(n_pairs: int, plus_user: bool = True) -> list[dict]:
+    msgs: list[dict] = []
+    for i in range(n_pairs):
+        msgs.append({"role": "user", "content": f"u{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+    if plus_user:
+        msgs.append({"role": "user", "content": "current"})
+    return msgs
+
+
+def test_window_short_history_passes_through():
+    msgs = _mk_history(2)  # 5 messages, under the cap
+    assert _window_messages(msgs) == msgs
+
+
+def test_window_long_history_always_opens_on_user():
+    # 6 pairs + current user = 13 messages: the naive [-10:] slice opens on an
+    # assistant message and the upstream API 400s — the long-conversation red
+    # error. The window must open on 'user' and keep the current turn last.
+    msgs = _mk_history(6)
+    windowed = _window_messages(msgs)
+    assert windowed[0]["role"] == "user"
+    assert windowed[-1] == {"role": "user", "content": "current"}
+    assert len(windowed) <= 10
+
+
+def test_window_degenerate_all_assistant_falls_back_to_last():
+    msgs = [{"role": "assistant", "content": "a"}] * 12
+    assert _window_messages(msgs) == [{"role": "assistant", "content": "a"}]
 
 
 def test_recall_envelope_carries_hints_not_facts_caveat():
