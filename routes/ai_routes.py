@@ -1,17 +1,20 @@
-"""AI clinical decision support routes.
+"""AI clinical decision-support route (legacy dashboard surface).
 
-CUE-09 MIGRATION (Phase 22) + diagnosis-on-Claude switch
---------------------------------------------------------
-The differential-diagnosis call now routes through the provider-neutral
-`utils.anthropic_client.anthropic_complete()` wrapper, which runs the request on
-Claude (the Opus tier — the model reserved for the high-stakes clinical /
-diagnosis surface) via the shared Cue adapter. The previous gpt-4o path went
-through `utils.openai_client.openai_complete()`; the swap was a one-line call-site
-change because both wrappers expose the same neutral `complete()`-shaped contract.
-Switching providers again (e.g. a future US-BAA provider) stays a wrapper swap.
+NAMING / LEGAL (Hector, 2026-06-29): nothing on this surface may be named or
+inferable as an "(official) diagnosis." The route, models, and fields speak of
+clinical decision SUPPORT and ranked CONSIDERATIONS; the only "diagnosis" token
+anywhere is the disclaimer's explicit denial.
 
-No provider-specific types appear here (D1 rule — verified by
-tests/cue/test_no_provider_leak.py).
+CONSOLIDATION (2026-07-02, sprint cleanup): this endpoint previously carried its
+own copy of the system prompt + prose parser. It now ADOPTS the single-source
+generator in services/cue/clinical_support.py — the same engine behind the Cue
+conversational card — per that module's stated design ("used by BOTH"). The old
+/ai/diagnosis path is retired along with the duplicated logic; the surface is
+flag-hidden in the dashboard (CLINICAL_SUPPORT_IN_DASH=false) and unreachable in
+prod, so the rename carries no live-traffic risk.
+
+Runs on the Opus reasoning tier via the provider-neutral wrapper (CUE-09).
+No provider-specific types appear here (D1 rule — tests/cue/test_no_provider_leak.py).
 """
 
 from __future__ import annotations
@@ -24,57 +27,23 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from services.cue.clinical_support import (
+    ClinicalSupportUnavailable,
+    generate_clinical_support,
+)
 from utils.auth import AuthenticatedPhysician, authenticated_physician
-from utils.anthropic_client import anthropic_complete
 
 logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-# ---------------------------------------------------------------------------
-# System prompt (preserved verbatim from pre-migration; rule #8 = no PII)
-# ---------------------------------------------------------------------------
 
-_DIAGNOSIS_SYSTEM_PROMPT = """\
-You are a clinical decision support tool for licensed physicians on the Medikah \
-telehealth platform. You assist physicians by generating ranked differential \
-diagnoses based on reported symptoms.
-
-IMPORTANT RULES:
-1. You are assisting a LICENSED PHYSICIAN, not a patient. Use professional \
-clinical language appropriate for a medical professional.
-2. Provide a ranked differential diagnosis list (most likely to least likely).
-3. For each diagnosis, include:
-   - The condition name
-   - A brief clinical rationale (1-2 sentences)
-   - A confidence indicator: HIGH, MODERATE, or LOW
-   - Key distinguishing features or tests that would confirm/rule out
-4. Always include a "Red Flags" section at the end highlighting any symptoms \
-that warrant urgent evaluation or immediate action.
-5. This is for CLINICAL DECISION SUPPORT only — remind the physician that \
-clinical correlation and examination are required.
-6. If the symptoms are vague or insufficient, say so and suggest what \
-additional history or examination findings would help narrow the differential.
-7. Limit your response to 5-8 differential diagnoses maximum.
-8. Do NOT store or reference any patient-identifying information. \
-Work only with the clinical presentation provided.
-9. Respond in the same language as the input (English or Spanish).
-"""
-
-# Model routing: the diagnosis surface runs on the Opus reasoning tier (the
-# highest-stakes clinical tier). The tier→model map lives in the adapter, so this
-# stays a quality knob, not a hardcoded model id. No sampling params: the Opus 4.x
-# family rejects temperature/top_p/top_k.
-_DIAGNOSIS_TIER = "opus"
-_DIAGNOSIS_MAX_TOKENS = 1200
-
-
-class DiagnosisRequest(BaseModel):
-    """Request model for AI-assisted differential diagnosis."""
+class ClinicalSupportRequest(BaseModel):
+    """Request model for AI clinical decision support (de-identified input only)."""
 
     symptoms: str = Field(
-        ..., min_length=5, max_length=3000, description="Clinical presentation"
+        ..., min_length=5, max_length=3000, description="De-identified clinical presentation"
     )
     age_range: Optional[str] = Field(
         default=None,
@@ -88,8 +57,8 @@ class DiagnosisRequest(BaseModel):
     )
 
 
-class DifferentialItem(BaseModel):
-    """A single differential diagnosis entry."""
+class ConsiderationItem(BaseModel):
+    """A single ranked clinical consideration."""
 
     condition: str
     rationale: str
@@ -97,200 +66,49 @@ class DifferentialItem(BaseModel):
     distinguishing_factors: str
 
 
-class DiagnosisResponse(BaseModel):
-    """Response model for AI-assisted differential diagnosis."""
+class ClinicalSupportResponse(BaseModel):
+    """Response model for AI clinical decision support."""
 
-    differentials: List[DifferentialItem]
+    considerations: List[ConsiderationItem]
     red_flags: List[str]
     disclaimer: str
     raw_text: str = Field(description="Full AI response text")
 
 
-@router.post("/diagnosis", response_model=DiagnosisResponse)
+@router.post("/clinical-support", response_model=ClinicalSupportResponse)
 @limiter.limit("10/minute")
-async def ai_diagnosis(
+async def ai_clinical_support(
     request: Request,
-    body: DiagnosisRequest,
+    body: ClinicalSupportRequest,
     auth: AuthenticatedPhysician = Depends(authenticated_physician),
-) -> DiagnosisResponse:
-    """Generate a ranked differential diagnosis for clinical decision support.
+) -> ClinicalSupportResponse:
+    """Generate ranked clinical considerations for decision support.
 
-    This endpoint is stateless and does not store any data. Restricted to
-    authenticated physicians (any verification status) — matches the auth gate
-    on the rest of the physician dashboard; the AI tool already sends the same
-    NextAuth bearer token its sibling dashboard components do.
+    Stateless, stores nothing, never logs the presentation. Restricted to
+    authenticated physicians (any verification status) — same gate as the rest
+    of the dashboard surface.
     """
-    # Build the user prompt with optional demographic context
-    user_parts = [f"Clinical presentation: {body.symptoms}"]
-    if body.age_range:
-        user_parts.append(f"Age range: {body.age_range}")
-    if body.sex:
-        user_parts.append(f"Biological sex: {body.sex}")
-
-    user_prompt = "\n".join(user_parts)
-    user_prompt += (
-        "\n\nProvide a ranked differential diagnosis with confidence levels "
-        "and red flags. Format each differential as:\n"
-        "1. **Condition** (CONFIDENCE)\n"
-        "   Rationale: ...\n"
-        "   Distinguishing factors: ...\n\n"
-        "End with a Red Flags section."
-    )
-
-    # Claude takes the system prompt as a separate argument (not a system-role
-    # message), so the wrapper receives it explicitly and the message list is
-    # user-only.
-    messages = [
-        {"role": "user", "content": user_prompt},
-    ]
-
-    # Route through the provider-neutral wrapper. The diagnosis surface runs on
-    # Claude (Opus tier) via the shared adapter; a provider swap needs zero edits
-    # to this block.
     try:
-        raw_text = await anthropic_complete(
-            system_prompt=_DIAGNOSIS_SYSTEM_PROMPT,
-            messages=messages,
-            tier=_DIAGNOSIS_TIER,
-            max_tokens=_DIAGNOSIS_MAX_TOKENS,
+        result = await generate_clinical_support(
+            presentation=body.symptoms,
+            age_range=body.age_range,
+            sex=body.sex,
         )
-
-        if raw_text is None:
-            raise HTTPException(
-                status_code=503,
-                detail="AI service is not configured or returned an empty response.",
-            )
-
-        # Parse the response into structured format
-        differentials, red_flags = _parse_diagnosis_response(raw_text)
-
-        return DiagnosisResponse(
-            differentials=differentials,
-            red_flags=red_flags,
-            disclaimer=(
-                "For clinical decision support only. Not a diagnosis. "
-                "Clinical correlation and examination are required. "
-                "Para soporte de decision clinica unicamente. No es un diagnostico."
-            ),
-            raw_text=raw_text,
-        )
-
-    except HTTPException:
-        raise
+    except ClinicalSupportUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AI service is not configured or returned an empty response.",
+        ) from exc
     except Exception as exc:
-        logger.exception("AI diagnosis generation failed: %s", exc)
+        logger.exception("Clinical support generation failed: %s", exc)
         raise HTTPException(
             status_code=502,
-            detail="Unable to generate diagnosis at this time. Please try again.",
+            detail="Unable to generate clinical support at this time. Please try again.",
         ) from exc
 
-
-def _parse_diagnosis_response(
-    raw_text: str,
-) -> tuple[List[DifferentialItem], List[str]]:
-    """Parse the AI response into structured differentials and red flags.
-
-    Best-effort parsing: if the format isn't exactly as expected,
-    we still return useful data.
-    """
-    differentials: List[DifferentialItem] = []
-    red_flags: List[str] = []
-    in_red_flags = False
-
-    lines = raw_text.split("\n")
-    current_condition = ""
-    current_confidence = "MODERATE"
-    current_rationale = ""
-    current_distinguishing = ""
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-
-        # Detect red flags section
-        lower = stripped.lower()
-        if "red flag" in lower and (":" in stripped or "##" in stripped or "**" in stripped):
-            # Flush current differential if any
-            if current_condition:
-                differentials.append(
-                    DifferentialItem(
-                        condition=current_condition,
-                        rationale=current_rationale or "See clinical details above.",
-                        confidence=current_confidence,
-                        distinguishing_factors=current_distinguishing or "Clinical correlation required.",
-                    )
-                )
-                current_condition = ""
-                current_rationale = ""
-                current_confidence = "MODERATE"
-                current_distinguishing = ""
-            in_red_flags = True
-            continue
-
-        if in_red_flags:
-            # Collect red flag items
-            clean = stripped.lstrip("-*0123456789.) ").strip()
-            if clean:
-                red_flags.append(clean)
-            continue
-
-        # Detect numbered differential entries (e.g., "1. **Condition** (HIGH)")
-        if len(stripped) > 2 and stripped[0].isdigit() and ("." in stripped[:4] or ")" in stripped[:4]):
-            # Flush previous
-            if current_condition:
-                differentials.append(
-                    DifferentialItem(
-                        condition=current_condition,
-                        rationale=current_rationale or "See clinical details above.",
-                        confidence=current_confidence,
-                        distinguishing_factors=current_distinguishing or "Clinical correlation required.",
-                    )
-                )
-                current_rationale = ""
-                current_confidence = "MODERATE"
-                current_distinguishing = ""
-
-            # Extract condition and confidence
-            entry = stripped.split(".", 1)[-1].strip() if "." in stripped[:4] else stripped.split(")", 1)[-1].strip()
-
-            # Try to extract confidence from parenthetical
-            for conf in ("HIGH", "MODERATE", "LOW"):
-                if conf in entry.upper():
-                    current_confidence = conf
-                    break
-
-            # Clean markdown bold and confidence markers
-            clean_entry = entry.replace("**", "").strip()
-            for conf in ("(HIGH)", "(MODERATE)", "(LOW)", "(high)", "(moderate)", "(low)"):
-                clean_entry = clean_entry.replace(conf, "").strip()
-            # Remove trailing dashes or colons
-            clean_entry = clean_entry.rstrip("-:").strip()
-            current_condition = clean_entry
-            continue
-
-        # Detect rationale and distinguishing lines
-        lower_stripped = stripped.lower()
-        if lower_stripped.startswith("rationale:") or lower_stripped.startswith("- rationale:"):
-            current_rationale = stripped.split(":", 1)[-1].strip()
-        elif lower_stripped.startswith("distinguishing") or lower_stripped.startswith("- distinguishing"):
-            current_distinguishing = stripped.split(":", 1)[-1].strip()
-        elif current_condition:
-            # Append to rationale if no specific prefix
-            if not current_rationale:
-                current_rationale = stripped.lstrip("-* ").strip()
-            elif not current_distinguishing:
-                current_distinguishing = stripped.lstrip("-* ").strip()
-
-    # Flush last differential
-    if current_condition:
-        differentials.append(
-            DifferentialItem(
-                condition=current_condition,
-                rationale=current_rationale or "See clinical details above.",
-                confidence=current_confidence,
-                distinguishing_factors=current_distinguishing or "Clinical correlation required.",
-            )
-        )
-
-    return differentials, red_flags
+    return ClinicalSupportResponse(
+        considerations=[ConsiderationItem(**c) for c in result["considerations"]],
+        red_flags=result["red_flags"],
+        disclaimer=result["disclaimer"],
+        raw_text=result["summary"],
+    )
