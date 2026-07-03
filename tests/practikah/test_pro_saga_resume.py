@@ -404,3 +404,35 @@ def test_rearm_skips_exhausted_and_arms_fresh(monkeypatch):
     assert armed == [("r-fresh", 4)]
     actions = [p["action"] for t, p in db.inserts if t == "workspace_audit_log"]
     assert actions == ["pro.finish_later_rearmed"]
+
+
+# ---------------------------------------------------------------------------
+# Audit writer — resource_id is a UUID column (day-5 live finding)
+# ---------------------------------------------------------------------------
+
+def test_audit_domain_resource_rides_in_detail_not_resource_id():
+    """Non-UUID resources (domain names) must not hit the UUID resource_id
+    column — Postgres rejects the row and the audit event silently drops."""
+    db = _FakeDB({})
+    pro_saga._log_workspace_audit(
+        db, "phys-1", action="pro.upgrade_finish_later",
+        resource="sandbox-dr-test.com", run_id="r1",
+        detail={"failed_step": "pro.write_dns"},
+    )
+    rows = [p for t, p in db.inserts if t == "workspace_audit_log"]
+    assert len(rows) == 1
+    assert rows[0]["resource_id"] is None
+    assert rows[0]["detail"]["resource"] == "sandbox-dr-test.com"
+    assert rows[0]["detail"]["run_id"] == "r1"
+
+
+def test_audit_uuid_resource_still_lands_in_resource_id():
+    db = _FakeDB({})
+    uuid_resource = "884ce7f9-ea05-4403-b9c6-992703e99f1c"
+    pro_saga._log_workspace_audit(
+        db, "phys-1", action="pro.upgrade_resumed",
+        resource=uuid_resource, run_id="r1",
+    )
+    rows = [p for t, p in db.inserts if t == "workspace_audit_log"]
+    assert rows[0]["resource_id"] == uuid_resource
+    assert "resource" not in rows[0]["detail"]

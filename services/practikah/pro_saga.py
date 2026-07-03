@@ -146,6 +146,19 @@ def _log_workspace_audit(
     if db is None:
         return
     try:
+        # workspace_audit_log.resource_id is a UUID column; pro-saga resources
+        # are usually domain names. Non-UUID resources ride in detail instead —
+        # otherwise Postgres rejects the row and the audit event silently drops
+        # (proven live in the day-5 sandbox resume proof).
+        payload_detail = {**(detail or {}), "run_id": run_id}
+        resource_id: Optional[str] = None
+        if resource:
+            try:
+                from uuid import UUID
+                UUID(str(resource))
+                resource_id = resource
+            except ValueError:
+                payload_detail["resource"] = resource
         db.table("workspace_audit_log").insert(
             {
                 "physician_id": physician_id,
@@ -153,8 +166,8 @@ def _log_workspace_audit(
                 "actor_role": "system",
                 "action": action,
                 "resource_type": "workspace",
-                "resource_id": resource,
-                "detail": {**(detail or {}), "run_id": run_id},
+                "resource_id": resource_id,
+                "detail": payload_detail,
             }
         ).execute()
     except Exception:
