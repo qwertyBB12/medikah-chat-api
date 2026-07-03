@@ -44,7 +44,7 @@ The backend is a Python/FastAPI service with no direct UI. Governance design rul
 | Language | Python 3.13 |
 | Framework | FastAPI |
 | Server | Uvicorn (ASGI) |
-| AI | OpenAI GPT-4o |
+| AI | GPT-4o (patient triage) · Claude via Cue adapter (Cue + clinical support) |
 | Database | Supabase (PostgreSQL) |
 | Email | Resend |
 | Rate Limiting | SlowAPI |
@@ -64,7 +64,7 @@ medikah-chat-api/
 │
 ├── routes/
 │   ├── physician_routes.py    # Physician dashboard, inquiries, availability
-│   └── ai_routes.py          # AI clinical decision support (/ai/diagnosis)
+│   └── ai_routes.py          # AI clinical decision support (/ai/clinical-support)
 │
 ├── models/
 │   └── physician.py          # Pydantic schemas (profile, inquiries, availability)
@@ -121,7 +121,7 @@ medikah-chat-api/
 
 | Endpoint | Method | Rate Limit | Purpose |
 |----------|--------|------------|---------|
-| `/ai/diagnosis` | POST | 10/min | Clinical decision support (differential diagnosis) |
+| `/ai/clinical-support` | POST | 10/min | Clinical decision support (ranked considerations) |
 
 ### POST /chat
 
@@ -388,15 +388,24 @@ Font: **Mulish** (referenced in email templates)
 
 ## AI Clinical Decision Support
 
-`routes/ai_routes.py` provides a stateless differential diagnosis tool for physicians:
+`routes/ai_routes.py` provides a stateless clinical decision-support tool for physicians.
+NAMING (Hector, 2026-06-29): nothing on this surface is named or inferable as a
+"diagnosis" — the route, models, and fields speak of clinical decision SUPPORT and
+ranked CONSIDERATIONS. Consolidated 2026-07-02: the endpoint adopts the single-source
+generator in `services/cue/clinical_support.py` (the same engine behind the Cue
+conversational card); the old `/ai/diagnosis` path and its duplicated prompt/parser
+are retired.
 
-- **Endpoint:** `POST /ai/diagnosis`
+- **Endpoint:** `POST /ai/clinical-support`
 - **Input:** symptoms (required), age_range, sex (optional)
-- **Output:** ranked differentials with confidence levels (HIGH/MODERATE/LOW), red flags
+- **Output:** ranked considerations with confidence levels (HIGH/MODERATE/LOW), red flags
 - **System prompt:** Clinical decision support framing — never definitive diagnoses
+- **Model:** Claude Opus reasoning tier via the provider-neutral Cue adapter
+  (`services/cue/adapter.py` `select_model("opus")`) — NOT OpenAI
 - **Privacy:** No PII stored, stateless, anonymous
 - **Rate limit:** 10/min
-- **Requires:** `OPENAI_API_KEY` env var (disabled if not set)
+- **Surfaces:** primary = the Cue dock's decision-support card; the legacy dashboard
+  tool (`ClinicalSupportTool.tsx`) is flag-hidden (`CLINICAL_SUPPORT_IN_DASH=false`)
 
 ---
 
@@ -407,7 +416,7 @@ Font: **Mulish** (referenced in email templates)
 3. **Rate Limiting:** 30/min on /chat and dashboard, 10/min on /schedule and actions
 4. **CORS:** Whitelist of allowed origins
 5. **No Diagnosis (Patient):** Patient-facing AI explicitly forbidden from medical advice
-6. **Clinical Support (Physician):** AI diagnosis tool framed as decision support only, with disclaimers
+6. **Clinical Support (Physician):** AI tool framed as decision support only (never "diagnosis"), with disclaimers
 7. **RLS Policies:** patient_inquiries and physician_availability use row-level security
 
 ---
@@ -429,5 +438,5 @@ Font: **Mulish** (referenced in email templates)
 - Next.js web application
 - Calls `/chat` and `/schedule` endpoints for patient flow
 - Calls `/physicians/*` endpoints for dashboard (inquiries, availability)
-- Calls `/ai/diagnosis` for physician clinical decision support tool
+- Calls `/ai/clinical-support` for the physician clinical decision-support tool (primary surface: the Cue dock card)
 - Handles physician onboarding and public profiles separately
