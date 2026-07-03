@@ -27,7 +27,32 @@ F5 on later is a one-line default/catalog change, no route edits.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
+
+# "Cue" is a NAME and must sound the same in every locale — like the English
+# letter "Q" (/kju/). Spanish TTS reads the raw spelling as "ku-e" (Hector,
+# voice QA 2026-07-02), so for es we swap the grapheme to one Spanish TTS
+# renders as /kju/. EN passes through untouched. Word-boundary only — never
+# rewrite inside another word.
+_CUE_WORD_RE = re.compile(r"\bcue\b", re.IGNORECASE)
+_ES_CUE_SPELLING = "kiú"
+
+
+def normalize_for_tts(text: str, locale: str) -> str:
+    """Locale-aware pronunciation fixes applied to text BEFORE synthesis.
+
+    Pure and conservative: today it only repairs the product name "Cue" for
+    Spanish voices. The chat transcript keeps the real spelling — only the
+    audio pipeline sees this.
+    """
+    if locale != "es" or not text:
+        return text
+
+    def _swap(m: re.Match[str]) -> str:
+        return _ES_CUE_SPELLING.capitalize() if m.group(0)[0].isupper() else _ES_CUE_SPELLING
+
+    return _CUE_WORD_RE.sub(_swap, text)
 
 
 class VoiceProviderError(Exception):

@@ -60,7 +60,13 @@ DO NOT save:
   - small talk or generic acknowledgment,
   - things Cue did (its own outputs) unless they encode a commitment,
   - sensitive patient clinical detail (diagnoses, conditions, identifiers) — MINIMIZE: keep
-    notes about the DOCTOR's practice, not the patient's medical record.
+    notes about the DOCTOR's practice, not the patient's medical record,
+  - hypothetical, demo, test, or role-played scenarios — including NAMED EXAMPLE CASES the
+    doctor uses to illustrate a point, test Cue, or explore a feature. A named patient case
+    may be saved as a follow_up ONLY when the turn clearly shows the doctor working it as
+    their real, ongoing clinical work. When in doubt whether a case is real, kept=false.
+    (Incident 2026-07-02: a demo "Reyes case" was saved as a real lab follow-up and Cue
+    opened a later session with it — the doctor had no such case.)
 
 Faithfulness: summarize faithfully in third person; preserve the doctor's own words for
 project and concept names; never invent a claim the turn does not support. {name_guard}

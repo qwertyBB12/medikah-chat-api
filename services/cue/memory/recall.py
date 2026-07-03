@@ -28,8 +28,27 @@ class RecallNote(TypedDict):
 _RECALL_SENTINEL = re.compile(r"<\/?\s*cue-session-recall\s*>", re.IGNORECASE)
 
 _HEADERS = {
-    "en": {"recent": "Recent notes (newest first):", "none": "(none yet)"},
-    "es": {"recent": "Notas recientes (más recientes primero):", "none": "(aún sin notas)"},
+    "en": {
+        "recent": "Recent notes (newest first):",
+        "none": "(none yet)",
+        # Notes are hints, not facts: they may be stale or come from demo/test
+        # sessions (incident 2026-07-02 — phantom "Reyes case" opener). The
+        # model must treat them as droppable, never argue for them.
+        "caveat": (
+            "Treat these notes as hints, not facts — they may be outdated or come "
+            "from a demo or test conversation. If the doctor does not recognize "
+            "something, drop it immediately and do not bring it up again."
+        ),
+    },
+    "es": {
+        "recent": "Notas recientes (más recientes primero):",
+        "none": "(aún sin notas)",
+        "caveat": (
+            "Trata estas notas como pistas, no como hechos — pueden estar "
+            "desactualizadas o provenir de una conversación de prueba. Si el médico "
+            "no reconoce algo, descártalo de inmediato y no vuelvas a mencionarlo."
+        ),
+    },
 }
 
 
@@ -57,5 +76,6 @@ def assemble_recall_envelope(notes: list[RecallNote], locale: str) -> str:
         "<cue-session-recall>",
         h["recent"],
         body,
+        h["caveat"],
         "</cue-session-recall>",
     ])

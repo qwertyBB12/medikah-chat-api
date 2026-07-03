@@ -395,8 +395,11 @@ async def cue_chat(
                 "No afirmes ningún pendiente, conteo, evento del calendario ni mensaje "
                 "de la bandeja: todavía no los has consultado. "
                 "Si recuerdas un hilo concreto y específico de una sesión previa — un "
-                "caso, una pregunta diferida o un seguimiento con nombre — lidera con ese "
-                "hilo en concreto, nunca con la idea de que lo recuerdas. Si no tienes un "
+                "caso, una pregunta diferida o un seguimiento con nombre — puedes ofrecerlo "
+                "como pregunta breve y tentativa, nunca como afirmación ni como la idea de "
+                "que lo recuerdas. La memoria puede estar desactualizada o venir de una "
+                "prueba: si el médico no reconoce el hilo o lo rechaza, descártalo de "
+                "inmediato, sin justificarte, y no vuelvas a mencionarlo. Si no tienes un "
                 "hilo concreto, saluda de forma simple, cálida y abierta, sin describirte."
             )
         else:
@@ -412,9 +415,12 @@ async def cue_chat(
                 "Do not assert any pending item, count, calendar event, or inbox message "
                 "— you have not checked them yet. "
                 "If you remember a concrete, specific thread from a prior session — a "
-                "case, a deferred question, a named follow-up — lead with that concrete "
-                "thread, never with the idea that you remember it. Otherwise greet "
-                "simply, warmly, and openly, without describing yourself."
+                "case, a deferred question, a named follow-up — you may OFFER it as a "
+                "short, tentative question, never as an assertion and never as the idea "
+                "that you remember it. Memory can be stale or come from a test session: "
+                "if the physician does not recognize the thread or waves it off, drop it "
+                "immediately, without justifying yourself, and do not mention it again. "
+                "Otherwise greet simply, warmly, and openly, without describing yourself."
             )
         messages = [{"role": "user", "content": directive}]
     else:
@@ -1008,11 +1014,18 @@ async def cue_tts(
         raise HTTPException(status_code=400, detail="Empty text")
 
     from services.cue.voice.catalog import resolve
-    from services.cue.voice.providers import VoiceProviderError, create_tts_provider
+    from services.cue.voice.providers import (
+        VoiceProviderError,
+        create_tts_provider,
+        normalize_for_tts,
+    )
 
     # Resolve voice + provider (provider-aware; never crashes with zero DB rows).
     selection = resolve(physician_id, body.locale, supabase=supabase)
     provider = create_tts_provider(selection["provider"])
+
+    # Pronunciation normalization (audio only — the transcript keeps "Cue").
+    text = normalize_for_tts(text, body.locale)
 
     _t_tts = time.monotonic()
     try:
@@ -1151,9 +1164,13 @@ def _resolve_doctor_address(supabase, physician_id: str) -> str:
         title = (wa.data[0].get("title") if getattr(wa, "data", None) else None)
         ph = (
             supabase.table("physicians")
-            .select("full_name").eq("id", physician_id).limit(1).execute()
+            .select("full_name, title").eq("id", physician_id).limit(1).execute()
         )
-        full_name = ((ph.data[0].get("full_name") if getattr(ph, "data", None) else "") or "").strip()
+        ph_row = ph.data[0] if getattr(ph, "data", None) else {}
+        full_name = ((ph_row.get("full_name") or "") if ph_row else "").strip()
+        # Workspace title (admin-confirmed at provisioning) wins; fall back to the
+        # onboarding-captured physicians.title. Neither present → no honorific.
+        title = title or (ph_row.get("title") if ph_row else None)
         last = full_name.split()[-1] if full_name else ""
         honorific = {"Dr": "Doctor", "Dra": "Doctora"}.get(title or "", "")
         if honorific and last:
@@ -1162,6 +1179,64 @@ def _resolve_doctor_address(supabase, physician_id: str) -> str:
     except Exception:
         logger.exception("[cue] address resolve failed physician=%s", physician_id)
         return ""
+
+
+def _build_identity_directive(locale: str, address: str) -> str:
+    """Pin the doctor's address (honorific + surname) into EVERY turn's system
+    prompt — not just the opening directive.
+
+    Incident 2026-07-02: with the address only in the opening turn, mid-
+    conversation Spanish turns drifted to a GUESSED gendered honorific
+    ("doctora" for a doctor whose title on file is Dr). The honorific comes
+    from the title chain and is NEVER guessed (feedback_dr_dra_title_mexico);
+    when no honorific is on file the model is told explicitly not to invent
+    one. The string is stable per-physician, so the cached system prefix is
+    unaffected across turns.
+    """
+    if address.startswith("Doctora "):
+        gender_es = "trátala en femenino (ella)"
+        gender_en = "she/her"
+    elif address.startswith("Doctor "):
+        gender_es = "trátalo en masculino (él)"
+        gender_en = "he/him"
+    else:
+        gender_es = ""
+        gender_en = ""
+
+    if locale == "es":
+        if address and gender_es:
+            return (
+                f"\n\nEl médico autenticado es {address}. Dirígete a esa persona SIEMPRE "
+                f"como «{address}» — exactamente ese honorífico y apellido; {gender_es}. "
+                f"NUNCA cambies el honorífico ni el género gramatical."
+            )
+        if address:
+            return (
+                f"\n\nEl nombre del médico autenticado es {address}. No hay honorífico "
+                f"registrado: usa solo su nombre y NUNCA digas «Doctor» ni «Doctora» — "
+                f"adivinar el género está prohibido."
+            )
+        return (
+            "\n\nNo hay nombre ni honorífico registrado para el médico autenticado: "
+            "no uses «Doctor» ni «Doctora» ni ningún nombre — dirígete de forma neutra."
+        )
+
+    if address and gender_en:
+        return (
+            f"\n\nThe authenticated physician is {address} ({gender_en}). ALWAYS address "
+            f"them as \"{address}\" — exactly that honorific and surname. NEVER switch "
+            f"the honorific or grammatical gender, in any language."
+        )
+    if address:
+        return (
+            f"\n\nThe authenticated physician's name is {address}. No honorific is on "
+            f"file: use the name only and NEVER say \"Doctor\" or \"Doctora\" — guessing "
+            f"gender is forbidden."
+        )
+    return (
+        "\n\nNo name or honorific is on file for the authenticated physician: do not "
+        "use \"Doctor\"/\"Doctora\" or any name — address them neutrally."
+    )
 
 
 # Launch market default. SOGo stores each physician's calendar in their own
@@ -1275,7 +1350,11 @@ async def _build_system_prompt(
             if notes:
                 recall = assemble_recall_envelope(notes, locale)
                 prompt = recall + "\n\n" + prompt
-        return prompt + _build_date_directive(locale, physician_tz)
+        # Identity pin — every turn, not just the opener (2026-07-02 "doctora"
+        # incident). Stable per-physician → cache-friendly. Fail-open: an empty
+        # address still yields an explicit never-guess directive.
+        address = _resolve_doctor_address(supabase, physician_id)
+        return prompt + _build_identity_directive(locale, address) + _build_date_directive(locale, physician_tz)
     except Exception as exc:
         logger.error(
             "[cue] assemble() failed for physician=%s locale=%s — using fallback prompt: %s",
