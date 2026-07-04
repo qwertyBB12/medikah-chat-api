@@ -485,3 +485,27 @@ def test_srv_idempotency_matches_on_name_alone(monkeypatch):
     )
     result = _asyncio.run(client.do_write_dns_record("z1", record, "run-1"))
     assert result.success and result.resource_id == "rec-existing"
+
+
+def test_add_domain_pins_all_quota_fields(monkeypatch):
+    """Mailcow rejects add/domain when server-default maxquota exceeds the
+    domain quota (mailbox_quota_exceeds_domain_quota, proven live day-5)."""
+    import asyncio as _asyncio
+    from services.practikah.mailbox_provisioner import MailboxProvisioner
+
+    prov = MailboxProvisioner("https://mc.test", "key-test")
+    captured: dict = {}
+
+    async def _fake_get_domain(domain):
+        return None
+
+    async def _fake_write(method, path, json_body):
+        captured.update(json_body)
+        return [{"type": "success", "msg": ["domain_added"]}]
+
+    monkeypatch.setattr(prov, "_get_domain", _fake_get_domain)
+    monkeypatch.setattr(prov, "_request_write", _fake_write)
+    result = _asyncio.run(prov.do_add_domain(domain="sandbox-drx.mx", run_id="run-1"))
+    assert result.success
+    assert captured["defquota"] == captured["maxquota"] == captured["quota"]
+    assert captured["mailboxes"] >= 1 and captured["aliases"] >= 1

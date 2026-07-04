@@ -314,7 +314,15 @@ class MailboxProvisioner:
         body: dict[str, Any] = {
             "domain": effective_domain,
             "description": f"Práctikah Pro tenant — run_id={run_id}",
+            # Pin all three quota fields: Mailcow falls back to SERVER defaults
+            # for defquota/maxquota when omitted (live default maxquota=10 GB),
+            # and rejects the create with mailbox_quota_exceeds_domain_quota
+            # whenever maxquota > quota (proven live, day-5 resume proof).
+            "defquota": quota_mb,
+            "maxquota": quota_mb,
             "quota": quota_mb,
+            "mailboxes": 10,
+            "aliases": 20,
             "active": "1",
             "rl_value": "200",
             "rl_frame": "h",
