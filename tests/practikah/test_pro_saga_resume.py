@@ -436,3 +436,52 @@ def test_audit_uuid_resource_still_lands_in_resource_id():
     rows = [p for t, p in db.inserts if t == "workspace_audit_log"]
     assert rows[0]["resource_id"] == uuid_resource
     assert "resource" not in rows[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# CF SRV encoding — flat-content SRV 400s against the live API (day-5 finding)
+# ---------------------------------------------------------------------------
+
+def test_srv_record_posts_structured_data(monkeypatch):
+    import asyncio as _asyncio
+    from services.practikah.cloudflare_client import CloudflareClient
+    from services.practikah.dns_writer import DnsRecord as CFDnsRecord
+
+    client = CloudflareClient("token-test")
+    captured: dict = {}
+
+    async def _fake_request(method, path, json_body=None, idempotency_key=None):
+        if method == "GET":
+            return {"result": []}
+        captured.update(json_body)
+        return {"result": {"id": "rec-1"}}
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    record = CFDnsRecord(
+        record_type="SRV", name="_caldav._tcp.drx.mx",
+        value="0 0 443 mail.drx.mx", priority=0, ttl=1,
+    )
+    result = _asyncio.run(client.do_write_dns_record("z1", record, "run-1"))
+    assert result.success
+    assert "content" not in captured and "priority" not in captured
+    assert captured["data"] == {"priority": 0, "weight": 0, "port": 443, "target": "mail.drx.mx"}
+
+
+def test_srv_idempotency_matches_on_name_alone(monkeypatch):
+    import asyncio as _asyncio
+    from services.practikah.cloudflare_client import CloudflareClient
+    from services.practikah.dns_writer import DnsRecord as CFDnsRecord
+
+    client = CloudflareClient("token-test")
+
+    async def _fake_request(method, path, json_body=None, idempotency_key=None):
+        assert method == "GET", "existing SRV must short-circuit before POST"
+        return {"result": [{"id": "rec-existing", "content": "0 443 mail.drx.mx"}]}
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    record = CFDnsRecord(
+        record_type="SRV", name="_caldav._tcp.drx.mx",
+        value="0 0 443 mail.drx.mx", priority=0, ttl=1,
+    )
+    result = _asyncio.run(client.do_write_dns_record("z1", record, "run-1"))
+    assert result.success and result.resource_id == "rec-existing"

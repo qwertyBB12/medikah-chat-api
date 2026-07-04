@@ -171,6 +171,10 @@ class CloudflareClient:
             f"/zones/{zone_id}/dns_records?type={record_type}&name={name}",
         )
         for record in data.get("result", []):
+            if record_type == "SRV":
+                # CF re-renders SRV content from its `data` object, so a flat
+                # string never round-trips — one SRV per service name is ours.
+                return record
             if record.get("content") == content:
                 return record
         return None
@@ -415,6 +419,19 @@ class CloudflareClient:
         }
         if record.priority is not None:
             body["priority"] = record.priority
+        if record.record_type == "SRV":
+            # CF rejects flat-content SRV with 400 — it requires a structured
+            # `data` object (service+proto ride in the record name). The
+            # template value is standard rdata order: "prio weight port target".
+            prio, weight, port, target = record.value.split()
+            del body["content"]
+            body.pop("priority", None)
+            body["data"] = {
+                "priority": record.priority if record.priority is not None else int(prio),
+                "weight": int(weight),
+                "port": int(port),
+                "target": target,
+            }
 
         try:
             data = await self._request(
