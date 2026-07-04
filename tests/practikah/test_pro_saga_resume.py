@@ -509,3 +509,15 @@ def test_add_domain_pins_all_quota_fields(monkeypatch):
     assert result.success
     assert captured["defquota"] == captured["maxquota"] == captured["quota"]
     assert captured["mailboxes"] >= 1 and captured["aliases"] >= 1
+
+
+def test_success_clears_stale_error_and_current_step():
+    """A run that failed then succeeded on resume must not keep the old
+    error envelope / current_step (misleads ops — day-5 proof)."""
+    db = _FakeDB({})
+    pro_saga._update_run_status(db, "r1", status="succeeded", clear_progress=True)
+    table, payload = db.updates[-1]
+    assert table == "provisioning_runs"
+    assert payload["status"] == "succeeded"
+    assert payload["current_step"] is None
+    assert payload["error"] is None

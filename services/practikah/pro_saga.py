@@ -99,6 +99,7 @@ def _update_run_status(
     current_step: Optional[str] = None,
     error: Optional[dict[str, Any]] = None,
     retry_count: Optional[int] = None,
+    clear_progress: bool = False,
 ) -> None:
     """Best-effort update to ``provisioning_runs`` row keyed by ``run_id``.
 
@@ -116,6 +117,11 @@ def _update_run_status(
         payload["error"] = error
     if retry_count is not None:
         payload["retry_count"] = retry_count
+    if clear_progress:
+        # Terminal success: a stale error envelope / current_step from an
+        # earlier failed attempt misleads ops (proven in the day-5 proof).
+        payload["current_step"] = None
+        payload["error"] = None
     if not payload:
         return
     try:
@@ -769,7 +775,7 @@ async def _execute_from(ctx: ProSagaContext, start_index: int) -> bool:
                 )
 
         _update_run_status(
-            ctx.db, ctx.run_id, status="succeeded", current_step=None
+            ctx.db, ctx.run_id, status="succeeded", clear_progress=True
         )
         _log_workspace_audit(
             ctx.db,
