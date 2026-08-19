@@ -13,7 +13,7 @@ def _chain(execute_data):
     result.data = execute_data
     # Every chained call returns the same builder; .execute() returns result.
     builder = sb.table.return_value
-    for attr in ("select", "insert", "eq", "order", "limit"):
+    for attr in ("select", "insert", "eq", "or_", "order", "limit"):
         getattr(builder, attr).return_value = builder
     builder.execute.return_value = result
     return sb
