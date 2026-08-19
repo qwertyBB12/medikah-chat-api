@@ -14,6 +14,10 @@ hands executors real:
   - availability_read  (HANDS-03):    reads physician_availability.
   - inquiry_list_recent(HANDS-04):    reads patient_inquiries (first name only).
 
+  - appointment_list   (appointments vertical): reads physician_appointments.
+  - appointment_create/move/cancel: PURE PROPOSERS over the same table (see the
+                                    appointment section near the bottom).
+
 The last two read Medikah's OWN tables through services/physician_dashboard.py
 and mint no credential, so the verified-gate below does NOT apply to them (same
 posture as clinical_decision_support). They still write a per-action audit row.
@@ -560,6 +564,279 @@ async def inquiry_list_recent(
         status = getattr(inq.status, "value", inq.status)
         lines.append(f"- {when} — {first_name} [{status}] (id: {inq.inquiry_id})")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Appointment vertical — appointment_list (READ) + appointment_create/move/cancel
+# (PURE PROPOSERS).
+#
+# Same D-03 two-component design as calendar_block_time/calendar_clear_range: the
+# three write tools NEVER touch the DB or the calendar. Each returns ONLY a
+# confirm-card payload; the mutation happens at POST /cue/appointments/confirm-write
+# after the doctor clicks Confirm.
+#
+# The move/cancel proposers DO read the appointment row — a card that says
+# "cancel the appointment" without naming which one is not a confirmation, it is
+# a coin flip. Reading is not writing: there is still no mutation path here. That
+# read is also the first IDOR/blast-radius check, so an appointment that is not
+# the session physician's, or that Cue did not create, never even gets a card.
+#
+# NO verified-gate on any of these: like availability_read and inquiry_list_recent
+# they read Medikah's OWN table and mint no Mailcow credential. The confirm-write
+# route applies the verified-gate before it touches CalDAV.
+# ---------------------------------------------------------------------------
+
+_APPOINTMENTS_CONFIRM_ENDPOINT = "/cue/appointments/confirm-write"
+
+
+def _appointment_not_found_message() -> str:
+    """Bilingual 'no such appointment' line (no PHI, no ids echoed back)."""
+    return (
+        "No encontré esa cita en tu agenda. / "
+        "I could not find that appointment on your schedule."
+    )
+
+
+def _appointment_not_cue_managed_message() -> str:
+    """Bilingual refusal for an appointment Cue did not create.
+
+    The DB-side half of the blast-radius rule (the X-CUE-MANAGED tag is the
+    calendar half): Cue moves and cancels only what Cue created.
+    """
+    return (
+        "Esa cita no la creó Cue, así que no puedo moverla ni cancelarla. "
+        "Puedes hacerlo desde tu panel. / "
+        "That appointment was not created by Cue, so I cannot move or cancel it. "
+        "You can do that from your dashboard."
+    )
+
+
+def _render_local(ts: Optional[str], tz_name: str) -> str:
+    """Render a stored UTC timestamp in the physician's local zone ('YYYY-MM-DD HH:MM').
+
+    Appointments are stored in UTC; the doctor thinks in their own wall-clock.
+    Handing the model the UTC string is the same bug that made Cue misreport
+    calendar times (Issue 3, 2026-06-28). Falls back to the raw value rather than
+    raising — a rendering hiccup must not take down the whole listing.
+    """
+    if not ts:
+        return ""
+    from datetime import datetime as _dt, timezone as _tz
+    from zoneinfo import ZoneInfo
+
+    try:
+        parsed = _dt.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_tz.utc)
+        return parsed.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(ts)
+
+
+def _appointment_window_summary(start_iso: str, end_iso: str) -> str:
+    """Human-readable window for a confirm card — same shape as _range_summary."""
+    return _range_summary(start_iso, end_iso)
+
+
+async def appointment_list(
+    physician_id: str,  # session-derived (dispatcher kwarg) — never model-supplied
+    limit: int = 10,    # functional arg from tool_input, capped by dispatcher
+) -> str:
+    """List the physician's upcoming appointments (soonest first).
+
+    Reads physician_appointments scoped to the session-derived physician_id
+    (CUE-11). Cancelled appointments are excluded; 'moved' ones are included
+    (a moved appointment is still on the book).
+
+    PHI DISCIPLINE: the stored patient_name is already minimized to first name +
+    last initial, and patient_contact is never selected — so the model context
+    gets a name fragment, a time, a status and an id, and nothing else.
+
+    A DB failure returns the bilingual "could not read" line rather than raising:
+    an is_error tool_result would leave the model guessing, and reporting an
+    empty schedule during an outage would be a lie the doctor could act on.
+    """
+    logger.debug(
+        "[cue:tools] appointment_list: physician=%s limit=%d", physician_id, limit
+    )
+
+    from services.cue.appointments_store import list_upcoming
+
+    tz_name = resolve_physician_tz(physician_id)
+    try:
+        rows = list_upcoming(_get_db(), physician_id, limit=max(1, limit))
+    except Exception:
+        logger.exception(
+            "[cue:tools] appointment_list failed physician=%s", physician_id
+        )
+        return _read_unavailable_message()
+
+    # Per-action audit — count only, NO patient names, NO IP+UA (HANDS-08a).
+    _write_action_audit(
+        physician_id,
+        "cue.appointment_list",
+        {"limit": limit, "appointment_count": len(rows)},
+    )
+
+    if not rows:
+        return (
+            "No tienes citas próximas. / You have no upcoming appointments."
+        )
+
+    lines = [f"Próximas citas / Upcoming appointments ({len(rows)}):"]
+    for row in rows:
+        when = _render_local(row.get("starts_at"), tz_name)
+        until = _render_local(row.get("ends_at"), tz_name)
+        end_time = until.split(" ")[-1] if until else ""
+        name = row.get("patient_name") or "(sin nombre / no name)"
+        status = row.get("status", "scheduled")
+        lines.append(
+            f"- {when}–{end_time} — {name} [{status}] (id: {row.get('id')})"
+        )
+    return "\n".join(lines)
+
+
+async def appointment_create(
+    physician_id: str,   # session-derived (dispatcher kwarg) — never model-supplied
+    patient_name: str,   # functional arg
+    start_iso: str,      # functional arg (physician-LOCAL time)
+    end_iso: str,        # functional arg (physician-LOCAL time)
+    locale: str = "es",  # session-derived (dispatcher kwarg)
+) -> str:
+    """PROPOSE a new appointment (D-03). NEVER writes — returns a confirm card only.
+
+    The patient name is minimized to first name + last initial HERE, before it
+    reaches the card, so the surface, the route, and the DB all see the same
+    minimal form and there is no path by which a full legal name gets stored.
+
+    There is deliberately NO patient_contact argument: the column exists for the
+    later notification build, but accepting an email or phone through a model
+    tool would put a raw identifier in the model's context for no present gain.
+    The confirm-write route accepts it, so a non-model surface can supply it.
+    """
+    import json
+
+    from services.cue.appointments_store import minimize_patient_name
+
+    display_name = minimize_patient_name(patient_name)
+    rng = _appointment_window_summary(start_iso, end_iso)
+    if locale == "es":
+        summary = f"¿Agendar cita con {display_name} el {rng}?"
+    else:
+        summary = f"Schedule an appointment with {display_name} on {rng}?"
+    payload = {
+        "kind": "confirm",
+        "action": "appointment_create",
+        # Tells the surface which confirm endpoint to POST to. Absent on the
+        # older calendar cards, which keep going to /cue/calendar/confirm-write.
+        "endpoint": _APPOINTMENTS_CONFIRM_ENDPOINT,
+        "title": display_name,
+        "summary": summary,
+        "start_iso": start_iso,
+        "end_iso": end_iso,
+        "patient_name": display_name,
+    }
+    return json.dumps(payload)
+
+
+async def appointment_move(
+    physician_id: str,    # session-derived (dispatcher kwarg) — never model-supplied
+    appointment_id: str,  # functional arg
+    start_iso: str,       # functional arg (new start, physician-LOCAL time)
+    end_iso: str,         # functional arg (new end, physician-LOCAL time)
+    locale: str = "es",   # session-derived (dispatcher kwarg)
+) -> str:
+    """PROPOSE moving an appointment (D-03). NEVER writes — confirm card only.
+
+    Reads the appointment first (scoped to physician_id) so the card can name the
+    patient and the time it is moving FROM. A row that is not this physician's,
+    or that Cue did not create, returns a plain refusal line instead of a card —
+    the proposal never even gets offered.
+    """
+    import json
+
+    from services.cue.appointments_store import get_appointment
+
+    tz_name = resolve_physician_tz(physician_id)
+    try:
+        row = get_appointment(_get_db(), physician_id, appointment_id)
+    except Exception:
+        logger.exception(
+            "[cue:tools] appointment_move lookup failed physician=%s", physician_id
+        )
+        return _read_unavailable_message()
+
+    if row is None or row.get("status") == "cancelled":
+        return _appointment_not_found_message()
+    if row.get("source") != "cue":
+        return _appointment_not_cue_managed_message()
+
+    name = row.get("patient_name") or ""
+    was = _render_local(row.get("starts_at"), tz_name)
+    rng = _appointment_window_summary(start_iso, end_iso)
+    if locale == "es":
+        summary = f"¿Mover la cita con {name} del {was} al {rng}?"
+    else:
+        summary = f"Move the appointment with {name} from {was} to {rng}?"
+    payload = {
+        "kind": "confirm",
+        "action": "appointment_move",
+        "endpoint": _APPOINTMENTS_CONFIRM_ENDPOINT,
+        "title": name,
+        "summary": summary,
+        "start_iso": start_iso,
+        "end_iso": end_iso,
+        "appointment_id": appointment_id,
+    }
+    return json.dumps(payload)
+
+
+async def appointment_cancel(
+    physician_id: str,    # session-derived (dispatcher kwarg) — never model-supplied
+    appointment_id: str,  # functional arg
+    locale: str = "es",   # session-derived (dispatcher kwarg)
+) -> str:
+    """PROPOSE cancelling an appointment (D-03). NEVER writes — confirm card only.
+
+    Same scoped read + cue-managed check as appointment_move. The card carries
+    the appointment's CURRENT window so the surface can show the doctor exactly
+    what is about to disappear.
+    """
+    import json
+
+    from services.cue.appointments_store import get_appointment
+
+    tz_name = resolve_physician_tz(physician_id)
+    try:
+        row = get_appointment(_get_db(), physician_id, appointment_id)
+    except Exception:
+        logger.exception(
+            "[cue:tools] appointment_cancel lookup failed physician=%s", physician_id
+        )
+        return _read_unavailable_message()
+
+    if row is None or row.get("status") == "cancelled":
+        return _appointment_not_found_message()
+    if row.get("source") != "cue":
+        return _appointment_not_cue_managed_message()
+
+    name = row.get("patient_name") or ""
+    when = _render_local(row.get("starts_at"), tz_name)
+    if locale == "es":
+        summary = f"¿Cancelar la cita con {name} del {when}?"
+    else:
+        summary = f"Cancel the appointment with {name} on {when}?"
+    payload = {
+        "kind": "confirm",
+        "action": "appointment_cancel",
+        "endpoint": _APPOINTMENTS_CONFIRM_ENDPOINT,
+        "title": name,
+        "summary": summary,
+        "start_iso": row.get("starts_at") or "",
+        "end_iso": row.get("ends_at") or "",
+        "appointment_id": appointment_id,
+    }
+    return json.dumps(payload)
 
 
 # ---------------------------------------------------------------------------

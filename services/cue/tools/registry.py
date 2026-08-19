@@ -179,6 +179,139 @@ NEUTRAL_TOOLS: list[CueNeutralTool] = [
             "required": [],
         },
     ),
+    # ----- Appointments vertical — the appointment object (doctor-facing) -----
+    # appointment_list is a normal READ. The other three are PURE PROPOSERS on the
+    # same D-03 contract as calendar_block_time/clear_range: they NEVER write; the
+    # doctor's Confirm click drives POST /cue/appointments/confirm-write.
+    # NO physician_id, NO confirmed, and NO patient contact property anywhere.
+    CueNeutralTool(
+        name="appointment_list",
+        description=(
+            "Returns the authenticated physician's UPCOMING appointments, soonest "
+            "first: date, time, patient first name + last initial, status, and the "
+            "appointment id. Cancelled appointments are excluded. "
+            "Use when the doctor asks who is coming in, what their day or week "
+            "looks like, or before proposing a move or cancellation — the "
+            "appointment id you need for those comes from this tool. "
+            "Never accepts a physician_id argument — scope is always the "
+            "authenticated session."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max appointments to return.  Default 10, max 20.",
+                }
+            },
+            "required": [],
+        },
+    ),
+    CueNeutralTool(
+        name="appointment_create",
+        description=(
+            "PROPOSES booking a new appointment for the authenticated physician. "
+            "This tool NEVER writes — it returns a confirm card for the human to "
+            "approve. The appointment is created, and mirrored to the doctor's "
+            "calendar, only AFTER the physician clicks Confirm in the UI. Do NOT "
+            "claim or assume the appointment is booked. "
+            "The patient is NOT notified by this build — do not tell the doctor "
+            "the patient has been informed. "
+            "Give the patient's name as first name plus last initial (e.g. 'María "
+            "G.'); it is stored minimized either way. Do NOT pass a patient email, "
+            "phone number, or any other identifier — there is no field for one. "
+            "Never accepts a physician_id or confirmed argument."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "patient_name": {
+                    "type": "string",
+                    "description": (
+                        "Patient's first name plus last initial (e.g. 'María G.'). "
+                        "No full legal names, no other identifiers."
+                    ),
+                },
+                "start_iso": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 datetime for the appointment start, in the "
+                        "physician's LOCAL timezone (the same zone as the "
+                        "current-time reference above), e.g. '2026-09-01T09:00:00'. "
+                        "No offset/'Z' needed."
+                    ),
+                },
+                "end_iso": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 datetime for the appointment end, in the "
+                        "physician's LOCAL timezone. No offset/'Z' needed."
+                    ),
+                },
+            },
+            "required": ["patient_name", "start_iso", "end_iso"],
+        },
+    ),
+    CueNeutralTool(
+        name="appointment_move",
+        description=(
+            "PROPOSES moving an existing appointment to a new time. This tool NEVER "
+            "writes — it returns a confirm card for the human to approve; the move "
+            "happens only AFTER the physician clicks Confirm. Do NOT claim or assume "
+            "the appointment has moved, and do NOT tell the doctor the patient has "
+            "been notified — this build does not notify patients. "
+            "Get appointment_id from appointment_list; never invent one. Cue can "
+            "only move appointments Cue created. "
+            "Never accepts a physician_id or confirmed argument."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "appointment_id": {
+                    "type": "string",
+                    "description": "The appointment id, as returned by appointment_list.",
+                },
+                "start_iso": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 datetime for the NEW start, in the physician's "
+                        "LOCAL timezone (no offset/'Z' needed)."
+                    ),
+                },
+                "end_iso": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 datetime for the NEW end, in the physician's "
+                        "LOCAL timezone (no offset/'Z' needed)."
+                    ),
+                },
+            },
+            "required": ["appointment_id", "start_iso", "end_iso"],
+        },
+    ),
+    CueNeutralTool(
+        name="appointment_cancel",
+        description=(
+            "PROPOSES cancelling an appointment. This tool NEVER writes — it returns "
+            "a confirm card for the human to approve; the cancellation happens only "
+            "AFTER the physician clicks Confirm. Do NOT claim or assume the "
+            "appointment is cancelled, and do NOT tell the doctor the patient has "
+            "been notified — this build does not notify patients. "
+            "Get appointment_id from appointment_list; never invent one. Cue can "
+            "only cancel appointments Cue created. "
+            "Never accepts a physician_id or confirmed argument."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "appointment_id": {
+                    "type": "string",
+                    "description": "The appointment id, as returned by appointment_list.",
+                }
+            },
+            "required": ["appointment_id"],
+        },
+    ),
     # ----- Phase 24 — Cue clinical DECISION-SUPPORT surface -----
     # NAMING / LEGAL (Hector, 2026-06-29): a doctor-support tool. It is NEVER named or
     # framed as an "(official) diagnosis" — it returns ranked clinical CONSIDERATIONS
@@ -305,6 +438,41 @@ async def dispatch_tool(
         # payload (JSON string); never writes. 'confirmed' is stripped above.
         from services.cue.tools.executors import calendar_clear_range
         return await calendar_clear_range(physician_id=physician_id, locale=locale, **safe_input)
+
+    if tool_name == "appointment_list":
+        # Appointments vertical — READ. limit hard-capped at 20 like the other lists.
+        from services.cue.tools.executors import appointment_list
+        limit = int(safe_input.get("limit", 10))
+        return await appointment_list(physician_id=physician_id, limit=min(limit, 20))
+
+    if tool_name in ("appointment_create", "appointment_move", "appointment_cancel"):
+        # Appointments vertical — PURE PROPOSERS (D-03). Each returns ONLY a
+        # confirm-card payload; never writes. Args are pulled by name rather than
+        # **safe_input so an unexpected model key (a hallucinated patient_email,
+        # say) is dropped here instead of becoming a TypeError the model has to
+        # interpret — and can never reach an executor parameter.
+        from services.cue.tools import executors as _appt
+        if tool_name == "appointment_create":
+            return await _appt.appointment_create(
+                physician_id=physician_id,
+                patient_name=str(safe_input.get("patient_name", "")).strip(),
+                start_iso=str(safe_input.get("start_iso", "")).strip(),
+                end_iso=str(safe_input.get("end_iso", "")).strip(),
+                locale=locale,
+            )
+        if tool_name == "appointment_move":
+            return await _appt.appointment_move(
+                physician_id=physician_id,
+                appointment_id=str(safe_input.get("appointment_id", "")).strip(),
+                start_iso=str(safe_input.get("start_iso", "")).strip(),
+                end_iso=str(safe_input.get("end_iso", "")).strip(),
+                locale=locale,
+            )
+        return await _appt.appointment_cancel(
+            physician_id=physician_id,
+            appointment_id=str(safe_input.get("appointment_id", "")).strip(),
+            locale=locale,
+        )
 
     if tool_name == "clinical_decision_support":
         # Phase 24 — Cue clinical decision-support surface. presentation is the only
