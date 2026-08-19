@@ -200,6 +200,29 @@ class CueConfirmWriteRequest(BaseModel):
     locale: str = "es"
 
 
+class CueAppointmentWriteRequest(BaseModel):
+    """Body for POST /cue/appointments/confirm-write (the ONLY appointment mutation).
+
+    Same contract as CueConfirmWriteRequest: physician_id and 'confirmed-ness'
+    come from auth + the route call itself, NEVER from this body — calling the
+    endpoint IS the confirmation.
+
+    patient_contact is accepted here but has no model-tool counterpart on
+    purpose: the column exists for the LATER notification build, and a raw email
+    or phone must not travel through the model's context to get here. Only a
+    non-model surface can populate it today.
+    """
+
+    action: str                          # "create" | "move" | "cancel"
+    idempotency_token: str               # per-proposal UUID — dedup key
+    appointment_id: Optional[str] = None # required for move / cancel
+    patient_name: Optional[str] = None   # required for create (minimized on write)
+    patient_contact: Optional[str] = None# create only; never enters model context
+    start_iso: Optional[str] = None      # required for create / move (physician-LOCAL)
+    end_iso: Optional[str] = None        # required for create / move (physician-LOCAL)
+    locale: str = "es"
+
+
 class CueTtsRequest(BaseModel):
     """Body for POST /cue/tts (Plan 23-05 — VOICE-02/04).
 
@@ -903,6 +926,358 @@ async def cue_confirm_write(
     # Persist the result for idempotent replay (ON CONFLICT DO NOTHING backstop).
     authoritative = _confirm_write_store_result(supabase, physician_id, token, result)
     return authoritative
+
+
+# ---------------------------------------------------------------------------
+# POST /cue/appointments/confirm-write — the ONLY appointment mutation path
+#
+# Same idiom as /cue/calendar/confirm-write above: identical gate envelope,
+# the same (physician_id, idempotency_token) ledger, the same IP+UA audit rows.
+# What it adds is the two-store write: a physician_appointments row AND its
+# X-CUE-MANAGED mirror in the doctor's SOGo calendar.
+#
+# ORDER AND FAILURE HANDLING (deliberate):
+#   The DB row is written FIRST and is authoritative. The CalDAV mirror is
+#   best-effort: if it fails, the row is flagged needs_sync=true and the response
+#   says synced=false — we never crash and never roll back. An appointment the
+#   doctor just confirmed out loud must not evaporate because SOGo was briefly
+#   unreachable; a calendar that is one event behind is recoverable, a booking
+#   the doctor believes exists and does not is not.
+# ---------------------------------------------------------------------------
+
+
+def _appointment_event_title(patient_name: str, locale: str) -> str:
+    """Title for the mirrored VEVENT in the doctor's own calendar.
+
+    The patient name here is already minimized (first name + last initial) — it
+    is going into the doctor's private calendar, which is where their schedule
+    belongs, and nowhere else.
+    """
+    label = "Cita" if locale == "es" else "Appointment"
+    return f"{label}: {patient_name}".strip().rstrip(":")
+
+
+@router.post("/appointments/confirm-write")
+@limiter.limit("120/minute")  # per-physician abuse fuse, NOT a usage cap
+async def cue_appointment_confirm_write(
+    request: Request,
+    body: CueAppointmentWriteRequest,
+    auth: AuthenticatedPhysician = Depends(authenticated_physician),
+) -> dict:
+    """Create / move / cancel an appointment after the doctor clicks Confirm.
+
+    Gate envelope: kill-switch → identity FROM auth → origin → idempotency →
+    verified workspace. The model tools that produced the confirm card are pure
+    proposers; this route is the only place an appointment is ever written.
+
+    Blast radius: move and cancel touch ONLY source='cue' rows scoped to the
+    session physician, and the calendar side deletes ONLY X-CUE-MANAGED events.
+    """
+    supabase = get_supabase()
+
+    # GATE 1: Kill-switch (CUE-04a) — writes are gated (HANDS-09a).
+    kill_status: KillSwitchResult = await check_kill_switch(supabase, body.locale)
+    if kill_status == "tripped":
+        raise HTTPException(
+            status_code=503, detail=bilingual_unavailable(body.locale)
+        )
+
+    # GATE 2: Identity — session-derived only (CUE-11 — NEVER from body).
+    physician_id: str = auth.physician_id
+    request.state._cue_physician_id = physician_id  # noqa: SLF001
+
+    # GATE 3: Origin check (CUE-04d) — state-changing route.
+    _check_origin(request)
+
+    action = (body.action or "").strip().lower()
+    if action not in ("create", "move", "cancel"):
+        raise HTTPException(status_code=400, detail="Invalid action")
+    if action in ("create", "move") and not (body.start_iso and body.end_iso):
+        raise HTTPException(status_code=400, detail="Missing start_iso/end_iso")
+    if action == "create" and not (body.patient_name or "").strip():
+        raise HTTPException(status_code=400, detail="Missing patient_name")
+    if action in ("move", "cancel") and not (body.appointment_id or "").strip():
+        raise HTTPException(status_code=400, detail="Missing appointment_id")
+
+    # IDEMPOTENCY FIRST: a replayed token returns the cached result and writes
+    # nothing — a double-clicked Confirm must not book two appointments.
+    token = body.idempotency_token
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing idempotency_token")
+    cached = _confirm_write_lookup_cached(supabase, physician_id, token)
+    if cached is not None:
+        logger.info(
+            "[cue] appointment confirm-write idempotent replay physician=%s action=%s",
+            physician_id,
+            action,
+        )
+        return cached
+
+    from services.cue.credential_broker import get_cue_cred
+    from services.cue.tools.executors import _load_workspace_context, resolve_physician_tz
+    from services.cue import appointments_store, calendar_dav
+
+    mailbox_local_part, verification_status = _load_workspace_context(physician_id)
+    if verification_status != "verified" or not mailbox_local_part:
+        raise HTTPException(status_code=403, detail="Workspace not connected")
+
+    cred = await get_cue_cred(physician_id, mailbox_local_part)
+    # The proposer emits the doctor's LOCAL wall-clock; storage is UTC.
+    physician_tz = resolve_physician_tz(physician_id)
+    ip, ua = _request_ip_ua(request)
+
+    def _utc_iso(value: str) -> str:
+        return calendar_dav.to_utc(value, physician_tz).isoformat()
+
+    try:
+        if action == "create":
+            result = await _appointment_create(
+                supabase, appointments_store, calendar_dav, cred,
+                physician_id=physician_id,
+                patient_name=body.patient_name or "",
+                patient_contact=body.patient_contact,
+                start_iso=body.start_iso or "",
+                end_iso=body.end_iso or "",
+                starts_at_utc=_utc_iso(body.start_iso or ""),
+                ends_at_utc=_utc_iso(body.end_iso or ""),
+                physician_tz=physician_tz,
+                locale=body.locale,
+            )
+        elif action == "move":
+            result = await _appointment_move(
+                supabase, appointments_store, calendar_dav, cred,
+                physician_id=physician_id,
+                appointment_id=body.appointment_id or "",
+                starts_at_utc=_utc_iso(body.start_iso or ""),
+                ends_at_utc=_utc_iso(body.end_iso or ""),
+                physician_tz=physician_tz,
+                locale=body.locale,
+            )
+        else:
+            result = await _appointment_cancel(
+                supabase, appointments_store, calendar_dav, cred,
+                physician_id=physician_id,
+                appointment_id=body.appointment_id or "",
+            )
+    except appointments_store.AppointmentStoreError:
+        # The appointment store could not be reached. Fail loudly: a doctor who
+        # heard "confirmed" must never be told so when nothing was stored.
+        logger.exception(
+            "[cue] appointment confirm-write store failure physician=%s action=%s",
+            physician_id,
+            action,
+        )
+        raise HTTPException(
+            status_code=503, detail=bilingual_unavailable(body.locale)
+        )
+
+    _write_confirm_audit(
+        supabase,
+        physician_id,
+        f"cue.appointment_{action}",
+        {
+            "appointment_id": result.get("appointment_id"),
+            "synced": result.get("synced"),
+        },
+        ip=ip,
+        ua=ua,
+    )
+
+    # Result JSON carries NO PHI — ids and sync state only (the ledger is not a
+    # place for a patient's name).
+    return _confirm_write_store_result(supabase, physician_id, token, result)
+
+
+async def _mirror_event(
+    calendar_dav, cred, *, physician_id: str, start_iso: str, end_iso: str,
+    title: str, tz_name: str,
+) -> Optional[str]:
+    """Write the X-CUE-MANAGED mirror event; return its uid, or None if it failed.
+
+    Never raises: the mirror is best-effort by design (see the ORDER AND FAILURE
+    HANDLING note above). block_time is reused verbatim so the mirror gets the
+    same X-CUE-MANAGED tag and the same content-dedup as every other Cue event.
+    """
+    try:
+        return await calendar_dav.block_time(
+            cred.username,
+            cred.password,
+            start_iso,
+            end_iso,
+            title,
+            physician_id=physician_id,
+            tz_name=tz_name,
+        )
+    except Exception:
+        logger.exception(
+            "[cue] appointment CalDAV mirror write failed physician=%s (needs_sync)",
+            physician_id,
+        )
+        return None
+
+
+async def _unmirror_event(
+    calendar_dav, cred, uid: Optional[str], *, physician_id: str
+) -> bool:
+    """Delete a mirror event by uid. Returns False on failure (never raises).
+
+    A uid that no longer resolves counts as success — the mirror is already gone,
+    which is the state we wanted.
+    """
+    if not uid:
+        return True
+    try:
+        await calendar_dav.delete_event_by_uid(
+            cred.username, cred.password, uid, physician_id=physician_id
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "[cue] appointment CalDAV mirror delete failed physician=%s uid=%s "
+            "(needs_sync)",
+            physician_id,
+            uid,
+        )
+        return False
+
+
+def _record_mirror_state(
+    store, supabase, physician_id: str, appointment_id: str, *,
+    caldav_uid: Optional[str], needs_sync: bool,
+) -> None:
+    """Persist the mirror state, and swallow a failure to persist it.
+
+    By the time this runs the appointment itself is already written — that is
+    the part the doctor was promised. If THIS bookkeeping update fails we must
+    not turn a successful booking into a 5xx: the doctor would retry with a
+    fresh idempotency token and book the same patient twice. A wrong
+    needs_sync flag is a reconciliation problem; a double booking is a real one.
+    """
+    try:
+        store.set_mirror(
+            supabase, physician_id, appointment_id,
+            caldav_uid=caldav_uid, needs_sync=needs_sync,
+        )
+    except Exception:
+        logger.exception(
+            "[cue] appointment mirror-state update failed physician=%s appointment=%s "
+            "(appointment itself is written)",
+            physician_id,
+            appointment_id,
+        )
+
+
+def _load_cue_appointment(store, supabase, physician_id: str, appointment_id: str) -> dict:
+    """Fetch an appointment for a move/cancel, enforcing both blast-radius rules.
+
+    Scoped to the session physician (CUE-11), must still be active, and must be
+    source='cue' — Cue mutates only what Cue created.
+    """
+    row = store.get_appointment(supabase, physician_id, appointment_id)
+    if row is None or row.get("status") == "cancelled":
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if row.get("source") != "cue":
+        raise HTTPException(
+            status_code=409, detail="Appointment was not created by Cue"
+        )
+    return row
+
+
+async def _appointment_create(
+    supabase, store, calendar_dav, cred, *, physician_id: str, patient_name: str,
+    patient_contact: Optional[str], start_iso: str, end_iso: str,
+    starts_at_utc: str, ends_at_utc: str, physician_tz: str, locale: str,
+) -> dict:
+    """DB row first (authoritative), then the calendar mirror (best-effort)."""
+    row = store.insert_appointment(
+        supabase,
+        physician_id,
+        patient_name=patient_name,
+        starts_at=starts_at_utc,
+        ends_at=ends_at_utc,
+        patient_contact=patient_contact,
+    )
+    appointment_id = row.get("id")
+
+    uid = await _mirror_event(
+        calendar_dav, cred,
+        physician_id=physician_id,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        title=_appointment_event_title(row.get("patient_name") or "", locale),
+        tz_name=physician_tz,
+    )
+    _record_mirror_state(
+        store, supabase, physician_id, appointment_id,
+        caldav_uid=uid, needs_sync=uid is None,
+    )
+    return {
+        "created": True,
+        "appointment_id": appointment_id,
+        "caldav_uid": uid,
+        "synced": uid is not None,
+    }
+
+
+async def _appointment_move(
+    supabase, store, calendar_dav, cred, *, physician_id: str, appointment_id: str,
+    starts_at_utc: str, ends_at_utc: str, physician_tz: str, locale: str,
+) -> dict:
+    """Move the row, then re-point the mirror (delete the old event, write a new one)."""
+    row = _load_cue_appointment(store, supabase, physician_id, appointment_id)
+    old_uid = row.get("caldav_uid")
+
+    store.apply_move(
+        supabase, physician_id, appointment_id,
+        starts_at=starts_at_utc,
+        ends_at=ends_at_utc,
+        previous_starts_at=row.get("starts_at"),
+        previous_ends_at=row.get("ends_at"),
+    )
+
+    removed = await _unmirror_event(
+        calendar_dav, cred, old_uid, physician_id=physician_id
+    )
+    uid = await _mirror_event(
+        calendar_dav, cred,
+        physician_id=physician_id,
+        start_iso=starts_at_utc,
+        end_iso=ends_at_utc,
+        title=_appointment_event_title(row.get("patient_name") or "", locale),
+        tz_name=physician_tz,
+    )
+    synced = removed and uid is not None
+    _record_mirror_state(
+        store, supabase, physician_id, appointment_id,
+        caldav_uid=uid, needs_sync=not synced,
+    )
+    return {
+        "moved": True,
+        "appointment_id": appointment_id,
+        "caldav_uid": uid,
+        "synced": synced,
+    }
+
+
+async def _appointment_cancel(
+    supabase, store, calendar_dav, cred, *, physician_id: str, appointment_id: str
+) -> dict:
+    """Cancel the row (status transition, never a delete), then drop the mirror."""
+    row = _load_cue_appointment(store, supabase, physician_id, appointment_id)
+
+    store.mark_cancelled(supabase, physician_id, appointment_id)
+    removed = await _unmirror_event(
+        calendar_dav, cred, row.get("caldav_uid"), physician_id=physician_id
+    )
+    _record_mirror_state(
+        store, supabase, physician_id, appointment_id,
+        caldav_uid=None, needs_sync=not removed,
+    )
+    return {
+        "cancelled": True,
+        "appointment_id": appointment_id,
+        "synced": removed,
+    }
 
 
 # ---------------------------------------------------------------------------
