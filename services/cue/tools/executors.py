@@ -11,6 +11,12 @@ hands executors real:
                                       kill-switch-gated Cue credential.
   - inbox_read_recent  (HANDS-02/04): reads recent inbox HEADERS read-only via
                                       IMAP (mark_seen=False).
+  - availability_read  (HANDS-03):    reads physician_availability.
+  - inquiry_list_recent(HANDS-04):    reads patient_inquiries (first name only).
+
+The last two read Medikah's OWN tables through services/physician_dashboard.py
+and mint no credential, so the verified-gate below does NOT apply to them (same
+posture as clinical_decision_support). They still write a per-action audit row.
 
 Plan 23-04 (WRITE increment) makes calendar_block_time / calendar_clear_range
 PURE PROPOSERS: each ALWAYS returns ONLY a confirm-card payload (json.dumps
@@ -77,6 +83,21 @@ def _connect_workspace_message() -> str:
         "Conecta tu espacio de trabajo de Medikah para que Cue pueda leer tu "
         "calendario y bandeja. / Connect your Medikah workspace to let Cue read "
         "your calendar and inbox."
+    )
+
+
+def _read_unavailable_message() -> str:
+    """Bilingual 'could not read that right now' message (no PHI, no internals).
+
+    Returned by the Medikah-table read executors when the DB is unavailable or a
+    read fails. These executors relay the gap honestly rather than raising: a
+    raised executor becomes an is_error tool_result the model has to guess at,
+    and the grounding spine already tells Cue to report tool emptiness plainly.
+    """
+    return (
+        "No pude leer esa información ahora mismo. Vuelve a intentarlo en un "
+        "momento. / I could not read that information right now. Please try "
+        "again in a moment."
     )
 
 
@@ -409,37 +430,66 @@ async def calendar_clear_range(
 
 
 # ---------------------------------------------------------------------------
-# availability_read executor stub (Phase 22 — UNCHANGED; Phase 23 HANDS-03)
+# availability_read executor (Phase 23 HANDS-03 — REAL)
 # ---------------------------------------------------------------------------
 
 
 async def availability_read(
     physician_id: str,  # session-derived (dispatcher kwarg) — never model-supplied
 ) -> str:
-    """
-    Return the physician's weekly availability grid.
+    """Return the physician's weekly availability grid (HANDS-03).
 
-    Phase 22: no-op stub — returns a benign placeholder.
-    Phase 23 HANDS-03: reads physician_availability scoped to physician_id.
+    Reads physician_availability through services.physician_dashboard, scoped to
+    the session-derived physician_id (CUE-11).
+
+    NO verified-gate: unlike calendar_read_day / inbox_read_recent, this reads
+    Medikah's OWN table and never mints a Mailcow credential, so it matches the
+    clinical_decision_support posture — any authenticated physician may use it.
 
     physician_id is sourced exclusively from dispatch_tool() (session-derived).
     No functional args accepted from tool_input for this tool.
     """
-    logger.debug(
-        "[cue:tools] availability_read stub: physician=%s", physician_id
+    logger.debug("[cue:tools] availability_read: physician=%s", physician_id)
+
+    from services.physician_dashboard import get_physician_availability
+
+    try:
+        availability = get_physician_availability(physician_id)
+    except Exception:
+        logger.exception(
+            "[cue:tools] availability_read failed physician=%s", physician_id
+        )
+        return _read_unavailable_message()
+
+    # Only days the doctor actually offers: a disabled or slotless day is noise
+    # the model would otherwise read back as part of the grid.
+    days = [
+        d
+        for d in (getattr(availability, "schedule", None) or [])
+        if d.enabled and d.slots
+    ]
+
+    # Per-action audit — shape only, NO slot times, NO IP+UA (HANDS-08a).
+    _write_action_audit(
+        physician_id, "cue.availability_read", {"day_count": len(days)}
     )
-    # Phase 22 stub — real implementation wired in a later HANDS-03 increment.
-    # Return a clean, jargon-free, bilingual "not connected yet" message: the
-    # grounding spine tells Cue to relay tool emptiness honestly, and the model
-    # may surface this string to the doctor (no internal phase markers).
-    return (
-        "La cuadrícula de disponibilidad aún no está conectada a tu espacio de "
-        "trabajo. / Your availability grid isn't connected to your workspace yet."
-    )
+
+    if not days:
+        return (
+            "Aún no has definido tu disponibilidad semanal. / "
+            "You have not set your weekly availability yet."
+        )
+
+    tz = getattr(availability, "timezone", None) or "UTC"
+    lines = [f"Disponibilidad semanal / Weekly availability ({tz}):"]
+    for day in days:
+        slots = ", ".join(f"{s.start_time}–{s.end_time}" for s in day.slots)
+        lines.append(f"- {day.day}: {slots}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# inquiry_list_recent executor stub (Phase 22 — UNCHANGED; Phase 23 HANDS-04)
+# inquiry_list_recent executor (Phase 23 HANDS-04 — REAL)
 # ---------------------------------------------------------------------------
 
 
@@ -447,29 +497,69 @@ async def inquiry_list_recent(
     physician_id: str,  # session-derived (dispatcher kwarg) — never model-supplied
     limit: int = 5,     # functional arg from tool_input, capped by dispatcher
 ) -> str:
-    """
-    Return the most recent patient inquiries for the physician.
+    """Return the most recent patient inquiries for the physician (HANDS-04).
 
-    Phase 22: no-op stub — returns a benign placeholder.
-    Phase 23 HANDS-04: reads patient_inquiries scoped to physician_id.
+    Reads patient_inquiries through services.physician_dashboard (the same
+    service backing GET /physicians/{id}/inquiries), scoped to the
+    session-derived physician_id (CUE-11). Pure read — accept/decline stay on
+    the dashboard, out of the model loop.
+
+    NO verified-gate, for the same reason as availability_read: Medikah's own
+    table, no Mailcow credential minted.
+
+    PHI DISCIPLINE (registry contract): patient FIRST NAME only, plus status and
+    date. Symptoms and patient email are deliberately NEVER placed in the tool
+    result — they would land in the model context and, from there, in a
+    transcript the doctor did not ask for.
 
     physician_id is sourced exclusively from dispatch_tool() (session-derived).
     'limit' is the ONLY functional arg accepted from tool_input (capped at 20
     by dispatch_tool before it arrives here).
     """
     logger.debug(
-        "[cue:tools] inquiry_list_recent stub: physician=%s limit=%d",
+        "[cue:tools] inquiry_list_recent: physician=%s limit=%d",
         physician_id,
         limit,
     )
-    # Phase 22 stub — real implementation wired in a later HANDS-04 increment.
-    # Clean, jargon-free, bilingual "not connected yet" message (see
-    # availability_read): the grounding spine has Cue relay this honestly rather
-    # than inventing a count of pending inquiries.
-    return (
-        "La cola de consultas de pacientes aún no está conectada a tu espacio de "
-        "trabajo. / Your patient-inquiry queue isn't connected to your workspace yet."
+
+    from services.physician_dashboard import get_physician_inquiries
+
+    try:
+        # Lower-bound the page size too: dispatch_tool caps the top end, but a
+        # model-supplied limit of 0 or a negative would make an empty page range.
+        page = get_physician_inquiries(
+            physician_id, page=1, page_size=max(1, limit)
+        )
+    except Exception:
+        logger.exception(
+            "[cue:tools] inquiry_list_recent failed physician=%s", physician_id
+        )
+        return _read_unavailable_message()
+
+    # Per-action audit — counts only, NO names/symptoms, NO IP+UA (HANDS-08a).
+    _write_action_audit(
+        physician_id,
+        "cue.inquiry_list_recent",
+        {"limit": limit, "inquiry_count": len(page.items)},
     )
+
+    if not page.items:
+        return (
+            "No tienes consultas de pacientes recientes. / "
+            "You have no recent patient inquiries."
+        )
+
+    lines = [
+        f"Consultas recientes / Recent inquiries "
+        f"({len(page.items)} de {page.total} / {len(page.items)} of {page.total}):"
+    ]
+    for inq in page.items:
+        when = inq.created_at.strftime("%Y-%m-%d") if inq.created_at else "(sin fecha / no date)"
+        full_name = (inq.patient_name or "").strip()
+        first_name = full_name.split()[0] if full_name else "(sin nombre / no name)"
+        status = getattr(inq.status, "value", inq.status)
+        lines.append(f"- {when} — {first_name} [{status}] (id: {inq.inquiry_id})")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
