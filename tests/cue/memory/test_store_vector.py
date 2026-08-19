@@ -17,7 +17,7 @@ def _table(data):
     """supabase mock whose .table(...).select().eq().order().limit().execute() returns data."""
     sb = MagicMock()
     builder = sb.table.return_value
-    for attr in ("select", "insert", "update", "eq", "order", "limit"):
+    for attr in ("select", "insert", "update", "eq", "or_", "order", "limit"):
         getattr(builder, attr).return_value = builder
     builder.execute.return_value = MagicMock(data=data)
     return sb

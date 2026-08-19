@@ -76,6 +76,7 @@ from services.cue.memory.store import (
     has_aviso_ack,
     list_notes,
     delete_note,
+    purge_expired_notes,
 )
 from services.cue.memory.recall import assemble_recall_envelope
 from services.cue.memory.embeddings import embed as embed_text
@@ -1160,6 +1161,47 @@ async def delete_memory_note(
 # their notes, but never rewrite one — a rewritten note would silently change how
 # Cue reasons, with effects the doctor cannot see (product decision 2026-06-28).
 # Delete is a privacy right; edit authority is withheld.
+
+
+# ---------------------------------------------------------------------------
+# Internal maintenance — memory retention sweep (PATCH-03 enforcement).
+# Not doctor-facing: this is the retention promise in the aviso, executed.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/internal/purge-expired-memory")
+async def internal_purge_expired_memory(request: Request) -> dict:
+    """Internal endpoint — hard-delete memory notes past their retention TTL.
+
+    Auth: ``X-Internal-Secret`` header must equal ``INTERNAL_API_SHARED_SECRET``
+    (same idiom as practikah's /internal/pro-redirect-map). Returns 403
+    otherwise, 503 when the secret is unset — a misconfiguration refuses rather
+    than opening the sweep to anyone.
+
+    Idempotent; intended for a daily cron. Ops usage:
+
+        curl -X POST .../cue/internal/purge-expired-memory \\
+             -H "X-Internal-Secret: $SECRET"
+    """
+    expected = os.environ.get("INTERNAL_API_SHARED_SECRET", "")
+    if not expected:
+        logger.error("internal_purge_expired_memory: INTERNAL_API_SHARED_SECRET not set")
+        raise HTTPException(status_code=503, detail="internal auth not configured")
+
+    secret = request.headers.get("X-Internal-Secret", "")
+    if secret != expected:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    supabase = get_supabase()
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    deleted = purge_expired_notes(supabase)
+    if deleted < 0:
+        # store fails open by contract; the cron must not read a failed sweep as
+        # a clean one, so the failure surfaces here.
+        raise HTTPException(status_code=500, detail="purge failed")
+    return {"purged": deleted}
 
 
 # ---------------------------------------------------------------------------
