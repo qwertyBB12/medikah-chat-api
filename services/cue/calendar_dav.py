@@ -12,9 +12,12 @@ WRITE increment (Plan 23-04 — REAL):
   - block_time(...)  : create a busy VEVENT tagged X-CUE-MANAGED (UTC), return uid.
   - clear_range(...) : delete ONLY X-CUE-MANAGED events in range; doctor-authored
                        (untagged) events are NEVER deleted; return {deleted, skipped}.
-  The SOLE caller is the route-level POST /cue/calendar/confirm-write (OUTSIDE the
-  model loop, after the doctor clicks Confirm — D-03). The model tools are PURE
-  PROPOSERS and never reach these functions.
+  - delete_event_by_uid(...): targeted single-event delete, ONLY if X-CUE-MANAGED
+                       (the appointment vertical's move/cancel mirror path).
+  The SOLE callers are the route-level POST /cue/calendar/confirm-write and
+  POST /cue/appointments/confirm-write (OUTSIDE the model loop, after the doctor
+  clicks Confirm — D-03). The model tools are PURE PROPOSERS and never reach
+  these functions.
 
 Credential discipline: the CalDAV client is built PER REQUEST from the Cue
 app-password (username/password) handed out by credential_broker.get_cue_cred.
@@ -207,6 +210,17 @@ def _to_utc(iso: str, default_tz: str = "UTC") -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def to_utc(iso: str, tz_name: str = "UTC") -> datetime:
+    """Public form of _to_utc for callers outside this module.
+
+    services/cue/appointments_store.py stores appointment times in UTC and must
+    interpret a naive (offset-less) time exactly the way the calendar does — as
+    the physician's LOCAL time. Sharing this function keeps that rule in one
+    place; a second implementation is how the 2026-06-28 six-hour shift happened.
+    """
+    return _to_utc(iso, tz_name)
+
+
 def _is_cue_managed(comp: Any) -> bool:
     """True iff the iCal component carries the X-CUE-MANAGED tag.
 
@@ -344,6 +358,62 @@ async def block_time(
         with client as c:
             return _write(_resolve_calendar(c))
     return _write(_resolve_calendar(client))
+
+
+async def delete_event_by_uid(
+    username: str,
+    password: str,
+    uid: str,
+    *,
+    physician_id: Optional[str] = None,
+) -> bool:
+    """Delete ONE event by UID, and ONLY if it carries X-CUE-MANAGED.
+
+    The appointment vertical needs a targeted delete (moving or cancelling one
+    appointment) where clear_range's window sweep would take every other Cue
+    block in the same hour with it.
+
+    Same blast-radius guard as clear_range: delete() is reachable only inside the
+    `if _is_cue_managed(...)` branch, so an untagged (doctor-authored) event with
+    a matching UID is left alone and reported as False. A UID that does not
+    resolve also returns False — a missing mirror is not an error worth failing
+    the doctor's cancellation over; the caller records it as a sync gap.
+    """
+    if not uid:
+        return False
+
+    def _delete(cal: Any) -> bool:
+        try:
+            event = cal.event_by_uid(uid)
+        except Exception:
+            logger.info(
+                "[cue:caldav] delete_event_by_uid: uid=%s not found physician=%s",
+                uid,
+                physician_id,
+            )
+            return False
+        if not _is_cue_managed(event.icalendar_component):
+            # Doctor-authored event — NEVER deleted by Cue.
+            logger.warning(
+                "[cue:caldav] delete_event_by_uid REFUSED (not cue-managed) uid=%s "
+                "physician=%s",
+                uid,
+                physician_id,
+            )
+            return False
+        event.delete()
+        logger.info(
+            "[cue:caldav] delete_event_by_uid deleted uid=%s physician=%s",
+            uid,
+            physician_id,
+        )
+        return True
+
+    client = _cue_client(username, password)
+    if hasattr(client, "__enter__"):
+        with client as c:
+            return _delete(_resolve_calendar(c))
+    return _delete(_resolve_calendar(client))
 
 
 async def clear_range(
